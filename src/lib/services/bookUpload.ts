@@ -99,7 +99,27 @@ export class BookUploadService {
         fileSize: file.size,
         uploadDate: new Date(),
         progress: 0,
-        totalPages: metadata.totalPages
+        totalPages: metadata.totalPages,
+        // Phase 1: Enhanced metadata fields
+        rating: undefined,
+        priority: 'normal',
+        status: 'unread',
+        collections: [],
+        tags: [],
+        notes: undefined,
+        isFavorite: false,
+        isFromDrive: true, // All uploads go to Drive
+        isDownloaded: false, // Will be downloaded when clicked
+        metadata: {
+          isbn: metadata.isbn,
+          publisher: metadata.publisher,
+          publicationDate: metadata.publicationDate,
+          language: metadata.language,
+          description: metadata.description,
+          genre: metadata.genre,
+          series: metadata.series,
+          volume: metadata.volume
+        }
       };
 
       onProgress?.({
@@ -115,99 +135,96 @@ export class BookUploadService {
       onProgress?.({
         stage: 'storing',
         progress: 75,
-        message: 'Storing book locally...'
+        message: 'Uploading to Google Drive...'
       });
 
-      // Store locally
-      const storedBook: StoredBook = {
-        ...book,
+      // Upload directly to Google Drive (no local storage)
+      if (!driveService || !booksFolderId) {
+        throw new Error('Google Drive service is required for book uploads');
+      }
+
+      onProgress?.({
+        stage: 'storing',
+        progress: 85,
+        message: 'Creating book folder in Google Drive...'
+      });
+
+      // Create dedicated folder for this book
+      const bookFolder = await driveService.createBookFolder(book.title, booksFolderId);
+      
+      onProgress?.({
+        stage: 'storing',
+        progress: 90,
+        message: 'Uploading book to Google Drive...'
+      });
+
+      // Upload the book file
+      const mimeType = GoogleDriveService.getMimeType(file.name);
+      
+      await driveService.uploadFile(
+        `book.${file.name.split('.').pop()}`,
         fileData,
-        cachedAt: new Date(),
-        lastAccessed: new Date()
-      };
+        mimeType,
+        bookFolder.bookFolderId
+      );
 
-      await this.indexedDB.storeBook(storedBook);
-
-      // Upload to Google Drive if service is provided
-      if (driveService && booksFolderId) {
+      // Upload cover if available
+      if (book.cover && coverResult.coverUrl) {
         onProgress?.({
           stage: 'storing',
-          progress: 85,
-          message: 'Creating book folder in Google Drive...'
+          progress: 95,
+          message: 'Uploading book cover...'
         });
 
         try {
-          // Create dedicated folder for this book
-          const bookFolder = await driveService.createBookFolder(book.title, booksFolderId);
-          
-          onProgress?.({
-            stage: 'storing',
-            progress: 90,
-            message: 'Uploading book to Google Drive...'
-          });
-
-          // Upload the book file
-          const fileData = await this.readFileData(file);
-          const mimeType = GoogleDriveService.getMimeType(file.name);
+          // Convert cover URL to blob and upload
+          const coverResponse = await fetch(coverResult.coverUrl);
+          const coverBlob = await coverResponse.blob();
+          const coverArrayBuffer = await coverBlob.arrayBuffer();
+          const coverData = new Uint8Array(coverArrayBuffer);
           
           await driveService.uploadFile(
-            `book.${file.name.split('.').pop()}`,
-            fileData,
-            mimeType,
+            'cover.jpg',
+            coverData,
+            'image/jpeg',
             bookFolder.bookFolderId
           );
-
-          // Upload cover if available
-          if (book.cover && coverResult.coverUrl) {
-            onProgress?.({
-              stage: 'storing',
-              progress: 95,
-              message: 'Uploading book cover...'
-            });
-
-            try {
-              // Convert cover URL to blob and upload
-              const coverResponse = await fetch(coverResult.coverUrl);
-              const coverBlob = await coverResponse.blob();
-              const coverArrayBuffer = await coverBlob.arrayBuffer();
-              const coverData = new Uint8Array(coverArrayBuffer);
-              
-              await driveService.uploadFile(
-                'cover.jpg',
-                coverData,
-                'image/jpeg',
-                bookFolder.bookFolderId
-              );
-            } catch (coverError) {
-              console.warn('Failed to upload cover:', coverError);
-            }
-          }
-
-          // Upload metadata
-          const metadataJson = JSON.stringify({
-            title: book.title,
-            author: book.author,
-            fileType: book.fileType,
-            fileSize: book.fileSize,
-            uploadDate: book.uploadDate.toISOString(),
-            totalPages: book.totalPages,
-            cover: book.cover
-          }, null, 2);
-
-          const metadataData = new TextEncoder().encode(metadataJson);
-          await driveService.uploadFile(
-            'metadata.json',
-            metadataData,
-            'application/json',
-            bookFolder.bookFolderId
-          );
-
-          console.log(`Book "${book.title}" uploaded to Google Drive folder: ${bookFolder.bookFolderName}`);
-        } catch (error) {
-          console.warn('Failed to upload to Google Drive:', error);
-          // Continue with local storage only
+        } catch (coverError) {
+          console.warn('Failed to upload cover:', coverError);
         }
       }
+
+      // Upload metadata
+      const metadataJson = JSON.stringify({
+        title: book.title,
+        author: book.author,
+        fileType: book.fileType,
+        fileSize: book.fileSize,
+        uploadDate: book.uploadDate.toISOString(),
+        totalPages: book.totalPages,
+        cover: book.cover,
+        // Include Phase 1 metadata
+        rating: book.rating,
+        priority: book.priority,
+        status: book.status,
+        collections: book.collections,
+        tags: book.tags,
+        notes: book.notes,
+        isFavorite: book.isFavorite,
+        isFromDrive: book.isFromDrive,
+        isDownloaded: book.isDownloaded,
+        metadata: book.metadata
+      }, null, 2);
+
+      const metadataData = new TextEncoder().encode(metadataJson);
+      await driveService.uploadFile(
+        'metadata.json',
+        metadataData,
+        'application/json',
+        bookFolder.bookFolderId
+      );
+
+      console.log(`Book "${book.title}" uploaded to Google Drive folder: ${bookFolder.bookFolderName}`);
 
       onProgress?.({
         stage: 'complete',
@@ -431,41 +448,320 @@ export class BookUploadService {
     await this.indexedDB.clearUserData();
   }
 
+  // ===== COLLECTIONS MANAGEMENT =====
+
   /**
-   * Get all books (local + remote metadata)
+   * Create a new collection
+   */
+  async createCollection(collection: Omit<Collection, 'id' | 'bookCount' | 'createdAt' | 'updatedAt'>): Promise<Collection> {
+    return await this.indexedDB.createCollection(collection);
+  }
+
+  /**
+   * Get all collections
+   */
+  async getAllCollections(): Promise<Collection[]> {
+    return await this.indexedDB.getAllCollections();
+  }
+
+  /**
+   * Update a collection
+   */
+  async updateCollection(id: string, updates: Partial<Collection>): Promise<Collection> {
+    return await this.indexedDB.updateCollection(id, updates);
+  }
+
+  /**
+   * Delete a collection
+   */
+  async deleteCollection(id: string): Promise<void> {
+    return await this.indexedDB.deleteCollection(id);
+  }
+
+  // ===== TAGS MANAGEMENT =====
+
+  /**
+   * Create or get a tag
+   */
+  async createOrGetTag(name: string, color?: string): Promise<Tag> {
+    return await this.indexedDB.createOrGetTag(name, color);
+  }
+
+  /**
+   * Get all tags
+   */
+  async getAllTags(): Promise<Tag[]> {
+    return await this.indexedDB.getAllTags();
+  }
+
+  /**
+   * Delete a tag
+   */
+  async deleteTag(id: string): Promise<void> {
+    return await this.indexedDB.deleteTag(id);
+  }
+
+  // ===== BOOK METADATA EDITING =====
+
+  /**
+   * Update book metadata
+   */
+  async updateBookMetadata(bookId: string, updates: BookEditData): Promise<Book | null> {
+    try {
+      const book = await this.indexedDB.getBook(bookId);
+      if (!book) {
+        throw new Error('Book not found');
+      }
+
+      const updatedBook = {
+        ...book,
+        ...updates,
+        // Handle collections and tags specially
+        collections: updates.collections || book.collections,
+        tags: updates.tags || book.tags,
+        // Update metadata if provided
+        metadata: updates.metadata ? { ...book.metadata, ...updates.metadata } : book.metadata
+      };
+
+      await this.indexedDB.storeBook(updatedBook);
+      console.log('Book metadata updated:', bookId);
+      
+      return updatedBook;
+    } catch (error) {
+      console.error('Failed to update book metadata:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Add book to collection
+   */
+  async addBookToCollection(bookId: string, collectionId: string): Promise<void> {
+    const book = await this.indexedDB.getBook(bookId);
+    if (!book) {
+      throw new Error('Book not found');
+    }
+
+    const collections = book.collections || [];
+    if (!collections.includes(collectionId)) {
+      collections.push(collectionId);
+      await this.updateBookMetadata(bookId, { collections });
+    }
+  }
+
+  /**
+   * Remove book from collection
+   */
+  async removeBookFromCollection(bookId: string, collectionId: string): Promise<void> {
+    const book = await this.indexedDB.getBook(bookId);
+    if (!book) {
+      throw new Error('Book not found');
+    }
+
+    const collections = (book.collections || []).filter(id => id !== collectionId);
+    await this.updateBookMetadata(bookId, { collections });
+  }
+
+  /**
+   * Add tags to book
+   */
+  async addTagsToBook(bookId: string, tagNames: string[]): Promise<void> {
+    const book = await this.indexedDB.getBook(bookId);
+    if (!book) {
+      throw new Error('Book not found');
+    }
+
+    // Create tags if they don't exist
+    for (const tagName of tagNames) {
+      await this.createOrGetTag(tagName);
+    }
+
+    const existingTags = book.tags || [];
+    const newTags = [...new Set([...existingTags, ...tagNames])];
+    await this.updateBookMetadata(bookId, { tags: newTags });
+  }
+
+  /**
+   * Remove tags from book
+   */
+  async removeTagsFromBook(bookId: string, tagNames: string[]): Promise<void> {
+    const book = await this.indexedDB.getBook(bookId);
+    if (!book) {
+      throw new Error('Book not found');
+    }
+
+    const tags = (book.tags || []).filter(tag => !tagNames.includes(tag));
+    await this.updateBookMetadata(bookId, { tags });
+  }
+
+  // ===== ADVANCED SEARCH =====
+
+  /**
+   * Search books with advanced filters
+   */
+  async searchBooks(filters: SearchFilters, options?: SearchOptions): Promise<Book[]> {
+    try {
+      let books = await this.getAllBooksWithDrive();
+
+      // Apply filters
+      if (filters.query) {
+        const query = filters.query.toLowerCase();
+        books = books.filter(book => 
+          book.title.toLowerCase().includes(query) ||
+          book.author.toLowerCase().includes(query) ||
+          book.tags?.some(tag => tag.toLowerCase().includes(query)) ||
+          book.notes?.toLowerCase().includes(query) ||
+          book.metadata?.description?.toLowerCase().includes(query)
+        );
+      }
+
+      if (filters.collections && filters.collections.length > 0) {
+        books = books.filter(book => 
+          book.collections?.some(collectionId => filters.collections!.includes(collectionId))
+        );
+      }
+
+      if (filters.tags && filters.tags.length > 0) {
+        books = books.filter(book => 
+          book.tags?.some(tag => filters.tags!.includes(tag))
+        );
+      }
+
+      if (filters.fileTypes && filters.fileTypes.length > 0) {
+        books = books.filter(book => filters.fileTypes!.includes(book.fileType));
+      }
+
+      if (filters.status && filters.status.length > 0) {
+        books = books.filter(book => book.status && filters.status!.includes(book.status));
+      }
+
+      if (filters.rating) {
+        books = books.filter(book => book.rating && book.rating >= filters.rating!);
+      }
+
+      if (filters.isFavorite !== undefined) {
+        books = books.filter(book => book.isFavorite === filters.isFavorite);
+      }
+
+      if (filters.isFromDrive !== undefined) {
+        books = books.filter(book => book.isFromDrive === filters.isFromDrive);
+      }
+
+      if (filters.isDownloaded !== undefined) {
+        books = books.filter(book => book.isDownloaded === filters.isDownloaded);
+      }
+
+      if (filters.priority && filters.priority.length > 0) {
+        books = books.filter(book => book.priority && filters.priority!.includes(book.priority));
+      }
+
+      if (filters.author) {
+        books = books.filter(book => 
+          book.author.toLowerCase().includes(filters.author!.toLowerCase())
+        );
+      }
+
+      if (filters.genre) {
+        books = books.filter(book => 
+          book.metadata?.genre?.toLowerCase().includes(filters.genre!.toLowerCase())
+        );
+      }
+
+      if (filters.dateRange) {
+        books = books.filter(book => {
+          const uploadDate = new Date(book.uploadDate);
+          return uploadDate >= filters.dateRange!.start && uploadDate <= filters.dateRange!.end;
+        });
+      }
+
+      if (filters.fileSizeRange) {
+        books = books.filter(book => 
+          book.fileSize >= filters.fileSizeRange!.min && book.fileSize <= filters.fileSizeRange!.max
+        );
+      }
+
+      // Apply sorting
+      if (options?.sortBy) {
+        books.sort((a, b) => {
+          let aValue: any, bValue: any;
+          
+          switch (options.sortBy) {
+            case 'title':
+              aValue = a.title.toLowerCase();
+              bValue = b.title.toLowerCase();
+              break;
+            case 'author':
+              aValue = a.author.toLowerCase();
+              bValue = b.author.toLowerCase();
+              break;
+            case 'uploadDate':
+              aValue = new Date(a.uploadDate).getTime();
+              bValue = new Date(b.uploadDate).getTime();
+              break;
+            case 'lastRead':
+              aValue = a.lastRead ? new Date(a.lastRead).getTime() : 0;
+              bValue = b.lastRead ? new Date(b.lastRead).getTime() : 0;
+              break;
+            case 'progress':
+              aValue = a.progress;
+              bValue = b.progress;
+              break;
+            case 'rating':
+              aValue = a.rating || 0;
+              bValue = b.rating || 0;
+              break;
+            case 'fileSize':
+              aValue = a.fileSize;
+              bValue = b.fileSize;
+              break;
+            default:
+              return 0;
+          }
+
+          if (aValue < bValue) return options.sortOrder === 'desc' ? 1 : -1;
+          if (aValue > bValue) return options.sortOrder === 'desc' ? -1 : 1;
+          return 0;
+        });
+      }
+
+      // Apply pagination
+      if (options?.limit) {
+        const offset = options.offset || 0;
+        books = books.slice(offset, offset + options.limit);
+      }
+
+      return books;
+    } catch (error) {
+      console.error('Failed to search books:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get all books (Drive only - no local storage)
    */
   async getAllBooksWithDrive(driveService?: GoogleDriveService): Promise<Book[]> {
     try {
-      // Get local books
-      const localBooks = await this.getAllBooks();
-      
       if (!driveService) {
-        return localBooks;
+        console.warn('BookUploadService: No Google Drive service available');
+        return [];
       }
 
-      // Get remote books from Google Drive
+      console.log('BookUploadService: Getting books from Google Drive...');
+      
+      // Get remote books from Google Drive only
       const driveFiles = await driveService.listBooks();
+      console.log('BookUploadService: Drive files returned:', driveFiles.length);
+      
       const remoteBooks = driveFiles.map(file => GoogleDriveService.driveFileToBook(file));
 
-      // Combine and deduplicate (prioritize local books)
-      const allBooks = [...localBooks];
+      console.log('BookUploadService: Converted to books:', remoteBooks.length);
+      console.log('BookUploadService: Book details:', remoteBooks.map(b => ({ id: b.id, title: b.title, isFromDrive: b.isFromDrive })));
       
-      for (const remoteBook of remoteBooks) {
-        // Check if we already have this book locally
-        const existingBook = localBooks.find(book => 
-          book.driveFileId === remoteBook.driveFileId
-        );
-        
-        if (!existingBook) {
-          allBooks.push(remoteBook);
-        }
-      }
-
-      return allBooks;
+      return remoteBooks;
     } catch (error) {
-      console.error('Failed to get all books with Drive:', error);
-      // Fallback to local books only
-      return await this.getAllBooks();
+      console.error('BookUploadService: Failed to get books from Drive:', error);
+      return [];
     }
   }
 

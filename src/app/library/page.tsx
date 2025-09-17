@@ -13,7 +13,10 @@ import { SearchService } from '@/lib/services/searchService';
 import { IndexedDBService } from '@/lib/storage/indexedDB';
 import { CoverManager } from '@/components/books/CoverManager';
 import { CoverManager as CoverManagerService } from '@/lib/services/coverManager';
-import { Book } from '@/types';
+import { CollectionsManager } from '@/components/library/CollectionsManager';
+import { BookEditModal } from '@/components/library/BookEditModal';
+import { AdvancedSearch } from '@/components/library/AdvancedSearch';
+import { Book, Collection, Tag, SearchFilters, SearchOptions, BookEditData } from '@/types';
 
 export default function LibraryPage() {
   const { isAuthenticated, isLoading, user, driveInfo, signOut, accessToken } = useAuth();
@@ -28,6 +31,18 @@ export default function LibraryPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [coverManagerOpen, setCoverManagerOpen] = useState(false);
   const [selectedBookForCover, setSelectedBookForCover] = useState<Book | null>(null);
+  
+  // New state for Phase 1 features
+  const [collections, setCollections] = useState<Collection[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [collectionsManagerOpen, setCollectionsManagerOpen] = useState(false);
+  const [bookEditModalOpen, setBookEditModalOpen] = useState(false);
+  const [selectedBookForEdit, setSelectedBookForEdit] = useState<Book | null>(null);
+  const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false);
+  const [selectedCollection, setSelectedCollection] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState<'title' | 'author' | 'uploadDate' | 'lastRead' | 'progress' | 'rating' | 'fileSize'>('title');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [isRefreshingCovers, setIsRefreshingCovers] = useState(false);
 
   // Initialize services
   useEffect(() => {
@@ -48,9 +63,14 @@ export default function LibraryPage() {
         setUploadService(uploadSvc);
 
         // Initialize Google Drive service
+        let driveSvc: GoogleDriveService | undefined;
         if (accessToken) {
-          const driveSvc = new GoogleDriveService(accessToken);
+          console.log('Library: Initializing Google Drive service with access token');
+          driveSvc = new GoogleDriveService(accessToken);
           setDriveService(driveSvc);
+          console.log('Library: Google Drive service initialized');
+        } else {
+          console.log('Library: No access token available for Google Drive');
         }
 
         // Initialize search service
@@ -70,30 +90,28 @@ export default function LibraryPage() {
         // Initialize cover manager service
         const coverMgr = new CoverManagerService();
         await coverMgr.initialize();
+        
+        // Set Google Drive service if available
+        if (driveSvc) {
+          coverMgr.setDriveService(driveSvc);
+        }
+        
         setCoverManagerService(coverMgr);
 
         // Load books (local + remote metadata)
-        const allBooks = await uploadSvc.getAllBooksWithDrive(driveService || undefined);
-        console.log('Loaded books (local + remote):', allBooks);
+        console.log('Library: About to load books with driveSvc:', !!driveSvc);
+        const allBooks = await uploadSvc.getAllBooksWithDrive(driveSvc);
+        console.log('Library: Loaded books (local + remote):', allBooks);
+        console.log('Library: Number of books found:', allBooks.length);
         setBooks(allBooks);
+
+        // Load collections and tags
+        const loadedCollections = await uploadSvc.getAllCollections();
+        const loadedTags = await uploadSvc.getAllTags();
+        setCollections(loadedCollections);
+        setTags(loadedTags);
       } catch (error) {
         console.error('Failed to initialize services:', error);
-        
-        // If IndexedDB error, try to force upgrade
-        if (error instanceof Error && error.message.includes('IndexedDB')) {
-          console.log('Attempting to force database upgrade...');
-          try {
-            const indexedDB = new IndexedDBService();
-            await indexedDB.forceUpgrade();
-            console.log('Database upgrade successful, retrying initialization...');
-            // Retry initialization
-            setTimeout(() => {
-              initializeServices().catch(console.error);
-            }, 1000);
-          } catch (upgradeError) {
-            console.error('Database upgrade failed:', upgradeError);
-          }
-        }
       }
     };
     initializeServices();
@@ -140,8 +158,8 @@ export default function LibraryPage() {
 
       if (result.success) {
         console.log('Upload successful, book created:', result.book);
-        // Refresh books list
-        const updatedBooks = await uploadService.getAllBooks();
+        // Refresh books list (now shows Drive books)
+        const updatedBooks = await uploadService.getAllBooksWithDrive(driveService ?? undefined);
         console.log('Updated books list:', updatedBooks);
         setBooks(updatedBooks);
       } else {
@@ -158,9 +176,9 @@ export default function LibraryPage() {
 
   const loadBooks = async () => {
     if (uploadService) {
-      const existingBooks = await uploadService.getAllBooks();
-      console.log('Loaded books from IndexedDB:', existingBooks);
-      setBooks(existingBooks);
+      const allBooks = await uploadService.getAllBooksWithDrive(driveService ?? undefined);
+      console.log('Loaded books (local + remote):', allBooks);
+      setBooks(allBooks);
     }
   };
 
@@ -176,16 +194,73 @@ export default function LibraryPage() {
     }
   };
 
-  // Filter books based on search query
-  const filteredBooks = books.filter(book => {
-    if (!searchQuery.trim()) return true;
-    const query = searchQuery.toLowerCase();
-    return (
-      book.title.toLowerCase().includes(query) ||
-      book.author.toLowerCase().includes(query) ||
-      book.id.toLowerCase().includes(query)
-    );
-  });
+  // Filter and sort books
+  const filteredBooks = useMemo(() => {
+    let filtered = books;
+
+    // Apply search query filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase();
+      filtered = filtered.filter(book => 
+        book.title.toLowerCase().includes(query) ||
+        book.author.toLowerCase().includes(query) ||
+        book.tags?.some(tag => tag.toLowerCase().includes(query)) ||
+        book.notes?.toLowerCase().includes(query) ||
+        book.metadata?.description?.toLowerCase().includes(query)
+      );
+    }
+
+    // Apply collection filter
+    if (selectedCollection) {
+      filtered = filtered.filter(book => 
+        book.collections?.includes(selectedCollection)
+      );
+    }
+
+    // Apply sorting
+    filtered.sort((a, b) => {
+      let aValue: any, bValue: any;
+      
+      switch (sortBy) {
+        case 'title':
+          aValue = a.title.toLowerCase();
+          bValue = b.title.toLowerCase();
+          break;
+        case 'author':
+          aValue = a.author.toLowerCase();
+          bValue = b.author.toLowerCase();
+          break;
+        case 'uploadDate':
+          aValue = new Date(a.uploadDate).getTime();
+          bValue = new Date(b.uploadDate).getTime();
+          break;
+        case 'lastRead':
+          aValue = a.lastRead ? new Date(a.lastRead).getTime() : 0;
+          bValue = b.lastRead ? new Date(b.lastRead).getTime() : 0;
+          break;
+        case 'progress':
+          aValue = a.progress;
+          bValue = b.progress;
+          break;
+        case 'rating':
+          aValue = a.rating || 0;
+          bValue = b.rating || 0;
+          break;
+        case 'fileSize':
+          aValue = a.fileSize;
+          bValue = b.fileSize;
+          break;
+        default:
+          return 0;
+      }
+
+      if (aValue < bValue) return sortOrder === 'desc' ? 1 : -1;
+      if (aValue > bValue) return sortOrder === 'desc' ? -1 : 1;
+      return 0;
+    });
+
+    return filtered;
+  }, [books, searchQuery, selectedCollection, sortBy, sortOrder]);
 
   const handleDeleteBook = async (book: Book, event: React.MouseEvent) => {
     event.stopPropagation(); // Prevent triggering the book click
@@ -239,6 +314,18 @@ export default function LibraryPage() {
             : book
         )
       );
+
+      // If this is a Drive book, refresh the library to get the updated cover from Drive
+      if (selectedBookForCover.id.startsWith('drive-') && uploadService && driveService) {
+        try {
+          console.log('Cover updated for Drive book, refreshing library...');
+          const updatedBooks = await uploadService.getAllBooksWithDrive(driveService);
+          setBooks(updatedBooks);
+          console.log('Library refreshed with updated cover from Drive');
+        } catch (error) {
+          console.error('Failed to refresh library after cover update:', error);
+        }
+      }
     }
   };
 
@@ -246,23 +333,136 @@ export default function LibraryPage() {
   const refreshBookCovers = useCallback(async () => {
     if (!coverManagerService) return;
     
-    const updatedBooks = await Promise.all(
-      books.map(async (book) => {
-        try {
-          const coverResult = await coverManagerService.getBookCover(book);
-          return {
-            ...book,
-            cover: coverResult.thumbnailUrl
-          };
-        } catch (error) {
-          console.warn(`Failed to get cover for book ${book.id}:`, error);
-          return book;
-        }
-      })
-    );
+    setIsRefreshingCovers(true);
+    console.log('Refreshing book covers...');
     
-    setBooks(updatedBooks);
+    try {
+      const updatedBooks = await Promise.all(
+        books.map(async (book) => {
+          try {
+            const coverResult = await coverManagerService.getBookCover(book);
+            console.log(`Cover refreshed for "${book.title}":`, coverResult.thumbnailUrl);
+            return {
+              ...book,
+              cover: coverResult.thumbnailUrl
+            };
+          } catch (error) {
+            console.warn(`Failed to get cover for book ${book.id}:`, error);
+            return book;
+          }
+        })
+      );
+      
+      setBooks(updatedBooks);
+      console.log('Book covers refreshed successfully');
+    } finally {
+      setIsRefreshingCovers(false);
+    }
   }, [books, coverManagerService]);
+
+  // ===== PHASE 1 FEATURE HANDLERS =====
+
+  // Collections Management
+  const handleCreateCollection = async (collection: Omit<Collection, 'id' | 'bookCount' | 'createdAt' | 'updatedAt'>) => {
+    if (!uploadService) return;
+    try {
+      const newCollection = await uploadService.createCollection(collection);
+      setCollections(prev => [...prev, newCollection]);
+    } catch (error) {
+      console.error('Failed to create collection:', error);
+    }
+  };
+
+  const handleUpdateCollection = async (id: string, updates: Partial<Collection>) => {
+    if (!uploadService) return;
+    try {
+      const updatedCollection = await uploadService.updateCollection(id, updates);
+      setCollections(prev => prev.map(c => c.id === id ? updatedCollection : c));
+    } catch (error) {
+      console.error('Failed to update collection:', error);
+    }
+  };
+
+  const handleDeleteCollection = async (id: string) => {
+    if (!uploadService) return;
+    try {
+      await uploadService.deleteCollection(id);
+      setCollections(prev => prev.filter(c => c.id !== id));
+    } catch (error) {
+      console.error('Failed to delete collection:', error);
+    }
+  };
+
+  const handleAddBookToCollection = async (bookId: string, collectionId: string) => {
+    if (!uploadService) return;
+    try {
+      await uploadService.addBookToCollection(bookId, collectionId);
+      // Refresh books to show updated collections
+      await loadBooks();
+    } catch (error) {
+      console.error('Failed to add book to collection:', error);
+    }
+  };
+
+  const handleRemoveBookFromCollection = async (bookId: string, collectionId: string) => {
+    if (!uploadService) return;
+    try {
+      await uploadService.removeBookFromCollection(bookId, collectionId);
+      // Refresh books to show updated collections
+      await loadBooks();
+    } catch (error) {
+      console.error('Failed to remove book from collection:', error);
+    }
+  };
+
+  // Book Editing
+  const handleEditBook = (book: Book) => {
+    setSelectedBookForEdit(book);
+    setBookEditModalOpen(true);
+  };
+
+  const handleSaveBook = async (bookId: string, updates: BookEditData) => {
+    if (!uploadService) return;
+    try {
+      await uploadService.updateBookMetadata(bookId, updates);
+      // Refresh books to show updated metadata
+      await loadBooks();
+      // Refresh collections and tags to show updated counts
+      const updatedCollections = await uploadService.getAllCollections();
+      const updatedTags = await uploadService.getAllTags();
+      setCollections(updatedCollections);
+      setTags(updatedTags);
+    } catch (error) {
+      console.error('Failed to save book:', error);
+      throw error;
+    }
+  };
+
+  // Advanced Search
+  const handleAdvancedSearch = async (filters: SearchFilters, options?: SearchOptions) => {
+    if (!uploadService) return [];
+    try {
+      return await uploadService.searchBooks(filters, options);
+    } catch (error) {
+      console.error('Advanced search failed:', error);
+      return [];
+    }
+  };
+
+  const handleSearchResults = (results: Book[]) => {
+    setBooks(results);
+  };
+
+  // Collection Filtering
+  const handleCollectionFilter = (collectionId: string | null) => {
+    setSelectedCollection(collectionId);
+  };
+
+  // Sorting
+  const handleSort = (newSortBy: typeof sortBy, newSortOrder?: typeof sortOrder) => {
+    setSortBy(newSortBy);
+    if (newSortOrder) setSortOrder(newSortOrder);
+  };
 
   if (isLoading) {
     return (
@@ -404,6 +604,90 @@ export default function LibraryPage() {
           )}
         </div>
 
+        {/* Phase 1: Collections, Tags, and Advanced Controls */}
+        <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-xl border border-white/20 p-6 mb-8">
+          <div className="flex flex-col lg:flex-row lg:items-center gap-4 mb-6">
+            <h3 className="text-lg font-semibold text-gray-900">Library Management</h3>
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={() => setCollectionsManagerOpen(true)}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
+              >
+                📚 Manage Collections
+              </button>
+              <button
+                onClick={() => setAdvancedSearchOpen(true)}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors text-sm font-medium"
+              >
+                🔍 Advanced Search
+              </button>
+            </div>
+          </div>
+
+          {/* Collection Filter */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-2">Filter by Collection</label>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => handleCollectionFilter(null)}
+                className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${
+                  !selectedCollection
+                    ? 'bg-blue-100 text-blue-800 border border-blue-300'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                All Books
+              </button>
+              {collections.map((collection) => (
+                <button
+                  key={collection.id}
+                  onClick={() => handleCollectionFilter(collection.id)}
+                  className={`px-3 py-1 rounded-full text-sm font-medium transition-colors flex items-center gap-2 ${
+                    selectedCollection === collection.id
+                      ? 'bg-blue-100 text-blue-800 border border-blue-300'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  <span>{collection.icon}</span>
+                  <span>{collection.name}</span>
+                  <span className="text-xs opacity-75">({collection.bookCount})</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Sorting Controls */}
+          <div className="flex flex-col sm:flex-row gap-4">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Sort by</label>
+              <select
+                value={sortBy}
+                onChange={(e) => handleSort(e.target.value as typeof sortBy)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              >
+                <option value="title">Title</option>
+                <option value="author">Author</option>
+                <option value="uploadDate">Date Added</option>
+                <option value="lastRead">Last Read</option>
+                <option value="progress">Reading Progress</option>
+                <option value="rating">Rating</option>
+                <option value="fileSize">File Size</option>
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Order</label>
+              <select
+                value={sortOrder}
+                onChange={(e) => handleSort(sortBy, e.target.value as typeof sortOrder)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              >
+                <option value="asc">Ascending</option>
+                <option value="desc">Descending</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
         {/* Modern Drive Storage Info */}
         {driveInfo && (
           <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-xl border border-white/20 p-6 mb-8">
@@ -512,6 +796,15 @@ export default function LibraryPage() {
                   {/* Action buttons */}
                   <div className="absolute top-3 right-3 flex gap-2 opacity-0 group-hover:opacity-100 transition-all duration-200 z-10">
                     <button
+                      onClick={(e) => handleEditBook(book)}
+                      className="w-8 h-8 bg-green-500 hover:bg-green-600 text-white rounded-full flex items-center justify-center shadow-lg"
+                      title="Edit book"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                    </button>
+                    <button
                       onClick={(e) => handleOpenCoverManager(book, e)}
                       className="w-8 h-8 bg-blue-500 hover:bg-blue-600 text-white rounded-full flex items-center justify-center shadow-lg"
                       title="Change cover"
@@ -536,21 +829,39 @@ export default function LibraryPage() {
                     onClick={() => handleBookClick(book)}
                     className="cursor-pointer p-4"
                   >
-                    <div className="aspect-[3/4] bg-gradient-to-br from-gray-100 to-gray-200 rounded-xl mb-4 flex items-center justify-center overflow-hidden shadow-inner">
+                    <div className="aspect-[3/4] bg-gradient-to-br from-gray-100 to-gray-200 rounded-xl mb-4 flex items-center justify-center overflow-hidden shadow-inner relative group">
                       {book.cover ? (
                         <img
                           src={book.cover}
                           alt={book.title}
                           className="w-full h-full object-cover rounded-xl group-hover:scale-105 transition-transform duration-300"
+                          onError={(e) => {
+                            console.error('Failed to load cover image:', book.cover);
+                            e.currentTarget.style.display = 'none';
+                            e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                          }}
                         />
-                      ) : (
-                        <div className="text-center">
-                          <svg className="w-16 h-16 text-gray-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      ) : null}
+                      <div className={`text-center ${book.cover ? 'hidden' : ''}`}>
+                        <div className="w-16 h-16 mx-auto mb-3 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center">
+                          <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
                           </svg>
-                          <p className="text-xs text-gray-500 font-medium">{book.fileType.toUpperCase()}</p>
                         </div>
-                      )}
+                        <p className="text-xs text-gray-600 font-semibold bg-white/80 px-2 py-1 rounded-full">
+                          {book.fileType.toUpperCase()}
+                        </p>
+                        {book.isFromDrive && (
+                          <div className="mt-2">
+                            <div className="inline-flex items-center px-2 py-1 bg-blue-100 text-blue-700 text-xs font-medium rounded-full">
+                              <svg className="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                                <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H4a1 1 0 01-1-1v-6zM14 9a1 1 0 00-1 1v6a1 1 0 001 1h2a1 1 0 001-1v-6a1 1 0 00-1-1h-2z" />
+                              </svg>
+                              {book.isDownloaded ? 'Downloaded' : 'Cloud'}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                     
                     <div className="space-y-2">
@@ -687,16 +998,27 @@ export default function LibraryPage() {
 
             <button
               onClick={refreshBookCovers}
-              className="group flex items-center p-6 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-2xl hover:from-green-100 hover:to-emerald-100 transition-all duration-300 hover:shadow-lg"
+              disabled={isRefreshingCovers}
+              className="group flex items-center p-6 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-2xl hover:from-green-100 hover:to-emerald-100 transition-all duration-300 hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <div className="p-3 bg-gradient-to-br from-green-100 to-green-200 rounded-xl mr-4 group-hover:scale-110 transition-transform duration-300">
-                <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
+                {isRefreshingCovers ? (
+                  <svg className="w-8 h-8 text-green-600 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                ) : (
+                  <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                )}
               </div>
               <div className="text-left">
-                <p className="font-bold text-gray-900 text-lg">Refresh Covers</p>
-                <p className="text-sm text-gray-600">Extract covers from uploaded books</p>
+                <p className="font-bold text-gray-900 text-lg">
+                  {isRefreshingCovers ? 'Refreshing...' : 'Refresh Covers'}
+                </p>
+                <p className="text-sm text-gray-600">
+                  {isRefreshingCovers ? 'Extracting covers from books...' : 'Extract covers from uploaded books'}
+                </p>
               </div>
             </button>
           </div>
@@ -712,6 +1034,41 @@ export default function LibraryPage() {
           onCoverUpdated={handleCoverUpdated}
         />
       )}
+
+      {/* Collections Manager Modal */}
+      <CollectionsManager
+        isOpen={collectionsManagerOpen}
+        onClose={() => setCollectionsManagerOpen(false)}
+        collections={collections}
+        books={books}
+        onCreateCollection={handleCreateCollection}
+        onUpdateCollection={handleUpdateCollection}
+        onDeleteCollection={handleDeleteCollection}
+        onAddBookToCollection={handleAddBookToCollection}
+        onRemoveBookFromCollection={handleRemoveBookFromCollection}
+      />
+
+      {/* Book Edit Modal */}
+      {selectedBookForEdit && (
+        <BookEditModal
+          isOpen={bookEditModalOpen}
+          onClose={() => setBookEditModalOpen(false)}
+          book={selectedBookForEdit}
+          collections={collections}
+          tags={tags}
+          onSave={handleSaveBook}
+        />
+      )}
+
+      {/* Advanced Search Modal */}
+      <AdvancedSearch
+        isOpen={advancedSearchOpen}
+        onClose={() => setAdvancedSearchOpen(false)}
+        collections={collections}
+        tags={tags}
+        onSearch={handleAdvancedSearch}
+        onResults={handleSearchResults}
+      />
     </div>
   );
 }

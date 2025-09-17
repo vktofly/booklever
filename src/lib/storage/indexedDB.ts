@@ -1,7 +1,7 @@
 // IndexedDB Service
 // Handles local storage for books, highlights, and user data
 
-import { Book, Highlight, UserPreferences } from '@/types';
+import { Book, Highlight, UserPreferences, Collection, Tag } from '@/types';
 
 export interface StoredBook extends Book {
   fileData: Uint8Array;
@@ -28,7 +28,7 @@ export interface StorageStats {
 
 export class IndexedDBService {
   private dbName: string = 'BookLeverDB';
-  private version: number = 4; // Incremented to add collections and tags support
+  private version: number = 5; // Incremented to add collections and tags support
   private db: IDBDatabase | null = null;
   private maxStorageSize: number = 2 * 1024 * 1024 * 1024; // 2GB
   private currentUserId: string | null = null;
@@ -738,6 +738,337 @@ export class IndexedDBService {
         // Fallback for older browsers
         resolve([]);
       }
+    });
+  }
+
+  // ===== COLLECTIONS MANAGEMENT =====
+
+  /**
+   * Create a new collection
+   */
+  async createCollection(collection: Omit<Collection, 'id' | 'bookCount' | 'createdAt' | 'updatedAt'>): Promise<Collection> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    const newCollection: Collection = {
+      ...collection,
+      id: `collection-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      bookCount: 0,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['collections'], 'readwrite');
+      const store = transaction.objectStore('collections');
+      const request = store.add(newCollection);
+
+      request.onsuccess = () => {
+        console.log('Collection created:', newCollection.name);
+        resolve(newCollection);
+      };
+
+      request.onerror = () => {
+        console.error('Failed to create collection:', request.error);
+        reject(new Error(`Failed to create collection: ${request.error?.message || 'Unknown error'}`));
+      };
+    });
+  }
+
+  /**
+   * Get all collections
+   */
+  async getAllCollections(): Promise<Collection[]> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['collections'], 'readonly');
+      const store = transaction.objectStore('collections');
+      const request = store.getAll();
+
+      request.onsuccess = () => {
+        const collections = request.result || [];
+        // Update book counts
+        this.updateCollectionBookCounts(collections).then(resolve).catch(reject);
+      };
+
+      request.onerror = () => {
+        console.error('Failed to get collections:', request.error);
+        reject(new Error(`Failed to get collections: ${request.error?.message || 'Unknown error'}`));
+      };
+    });
+  }
+
+  /**
+   * Update collection book counts
+   */
+  private async updateCollectionBookCounts(collections: Collection[]): Promise<Collection[]> {
+    if (!this.db) {
+      return collections;
+    }
+
+    const books = await this.getAllBooks();
+    
+    return collections.map(collection => ({
+      ...collection,
+      bookCount: books.filter(book => book.collections?.includes(collection.id)).length
+    }));
+  }
+
+  /**
+   * Update a collection
+   */
+  async updateCollection(id: string, updates: Partial<Collection>): Promise<Collection> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['collections'], 'readwrite');
+      const store = transaction.objectStore('collections');
+      const getRequest = store.get(id);
+
+      getRequest.onsuccess = () => {
+        const collection = getRequest.result;
+        if (!collection) {
+          reject(new Error('Collection not found'));
+          return;
+        }
+
+        const updatedCollection = {
+          ...collection,
+          ...updates,
+          updatedAt: new Date()
+        };
+
+        const putRequest = store.put(updatedCollection);
+        putRequest.onsuccess = () => {
+          console.log('Collection updated:', updatedCollection.name);
+          resolve(updatedCollection);
+        };
+        putRequest.onerror = () => {
+          console.error('Failed to update collection:', putRequest.error);
+          reject(new Error(`Failed to update collection: ${putRequest.error?.message || 'Unknown error'}`));
+        };
+      };
+
+      getRequest.onerror = () => {
+        console.error('Failed to get collection:', getRequest.error);
+        reject(new Error(`Failed to get collection: ${getRequest.error?.message || 'Unknown error'}`));
+      };
+    });
+  }
+
+  /**
+   * Delete a collection
+   */
+  async deleteCollection(id: string): Promise<void> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['collections', 'books'], 'readwrite');
+      const collectionsStore = transaction.objectStore('collections');
+      const booksStore = transaction.objectStore('books');
+
+      // First, remove this collection from all books
+      const booksRequest = booksStore.getAll();
+      booksRequest.onsuccess = () => {
+        const books = booksRequest.result || [];
+        books.forEach(book => {
+          if (book.collections?.includes(id)) {
+            book.collections = book.collections.filter((c: string) => c !== id);
+            booksStore.put(book);
+          }
+        });
+
+        // Then delete the collection
+        const deleteRequest = collectionsStore.delete(id);
+        deleteRequest.onsuccess = () => {
+          console.log('Collection deleted:', id);
+          resolve();
+        };
+        deleteRequest.onerror = () => {
+          console.error('Failed to delete collection:', deleteRequest.error);
+          reject(new Error(`Failed to delete collection: ${deleteRequest.error?.message || 'Unknown error'}`));
+        };
+      };
+
+      booksRequest.onerror = () => {
+        console.error('Failed to get books for collection deletion:', booksRequest.error);
+        reject(new Error(`Failed to get books: ${booksRequest.error?.message || 'Unknown error'}`));
+      };
+    });
+  }
+
+  // ===== TAGS MANAGEMENT =====
+
+  /**
+   * Create or get a tag
+   */
+  async createOrGetTag(name: string, color?: string): Promise<Tag> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    // First try to get existing tag
+    const existingTag = await this.getTagByName(name);
+    if (existingTag) {
+      return existingTag;
+    }
+
+    // Create new tag
+    const newTag: Tag = {
+      id: `tag-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      name,
+      color,
+      bookCount: 0,
+      createdAt: new Date()
+    };
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['tags'], 'readwrite');
+      const store = transaction.objectStore('tags');
+      const request = store.add(newTag);
+
+      request.onsuccess = () => {
+        console.log('Tag created:', newTag.name);
+        resolve(newTag);
+      };
+
+      request.onerror = () => {
+        console.error('Failed to create tag:', request.error);
+        reject(new Error(`Failed to create tag: ${request.error?.message || 'Unknown error'}`));
+      };
+    });
+  }
+
+  /**
+   * Get tag by name
+   */
+  async getTagByName(name: string): Promise<Tag | null> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['tags'], 'readonly');
+      const store = transaction.objectStore('tags');
+      const index = store.index('name');
+      const request = index.get(name);
+
+      request.onsuccess = () => {
+        resolve(request.result || null);
+      };
+
+      request.onerror = () => {
+        console.error('Failed to get tag by name:', request.error);
+        reject(new Error(`Failed to get tag: ${request.error?.message || 'Unknown error'}`));
+      };
+    });
+  }
+
+  /**
+   * Get all tags
+   */
+  async getAllTags(): Promise<Tag[]> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['tags'], 'readonly');
+      const store = transaction.objectStore('tags');
+      const request = store.getAll();
+
+      request.onsuccess = () => {
+        const tags = request.result || [];
+        // Update book counts
+        this.updateTagBookCounts(tags).then(resolve).catch(reject);
+      };
+
+      request.onerror = () => {
+        console.error('Failed to get tags:', request.error);
+        reject(new Error(`Failed to get tags: ${request.error?.message || 'Unknown error'}`));
+      };
+    });
+  }
+
+  /**
+   * Update tag book counts
+   */
+  private async updateTagBookCounts(tags: Tag[]): Promise<Tag[]> {
+    if (!this.db) {
+      return tags;
+    }
+
+    const books = await this.getAllBooks();
+    
+    return tags.map(tag => ({
+      ...tag,
+      bookCount: books.filter(book => book.tags?.includes(tag.name)).length
+    }));
+  }
+
+  /**
+   * Delete a tag
+   */
+  async deleteTag(id: string): Promise<void> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction(['tags', 'books'], 'readwrite');
+      const tagsStore = transaction.objectStore('tags');
+      const booksStore = transaction.objectStore('books');
+
+      // First, get the tag name
+      const getRequest = tagsStore.get(id);
+      getRequest.onsuccess = () => {
+        const tag = getRequest.result;
+        if (!tag) {
+          reject(new Error('Tag not found'));
+          return;
+        }
+
+        // Remove this tag from all books
+        const booksRequest = booksStore.getAll();
+        booksRequest.onsuccess = () => {
+          const books = booksRequest.result || [];
+          books.forEach(book => {
+            if (book.tags?.includes(tag.name)) {
+              book.tags = book.tags.filter((t: string) => t !== tag.name);
+              booksStore.put(book);
+            }
+          });
+
+          // Then delete the tag
+          const deleteRequest = tagsStore.delete(id);
+          deleteRequest.onsuccess = () => {
+            console.log('Tag deleted:', tag.name);
+            resolve();
+          };
+          deleteRequest.onerror = () => {
+            console.error('Failed to delete tag:', deleteRequest.error);
+            reject(new Error(`Failed to delete tag: ${deleteRequest.error?.message || 'Unknown error'}`));
+          };
+        };
+
+        booksRequest.onerror = () => {
+          console.error('Failed to get books for tag deletion:', booksRequest.error);
+          reject(new Error(`Failed to get books: ${booksRequest.error?.message || 'Unknown error'}`));
+        };
+      };
+
+      getRequest.onerror = () => {
+        console.error('Failed to get tag:', getRequest.error);
+        reject(new Error(`Failed to get tag: ${getRequest.error?.message || 'Unknown error'}`));
+      };
     });
   }
 }

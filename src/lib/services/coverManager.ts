@@ -5,6 +5,7 @@ import { Book } from '@/types';
 import { CoverExtractor, CoverExtractionResult } from './coverExtractor';
 import { CoverStorageService, StoredCover } from './coverStorage';
 import { IndexedDBService } from '@/lib/storage/indexedDB';
+import { GoogleDriveService } from './googleDriveService';
 
 export interface CoverManagerResult {
   coverUrl: string;
@@ -17,11 +18,19 @@ export class CoverManager {
   private coverExtractor: CoverExtractor;
   private coverStorage: CoverStorageService;
   private indexedDB: IndexedDBService;
+  private driveService: GoogleDriveService | null = null;
 
   constructor() {
     this.coverExtractor = new CoverExtractor();
     this.coverStorage = new CoverStorageService();
     this.indexedDB = new IndexedDBService();
+  }
+
+  /**
+   * Set Google Drive service for cloud cover management
+   */
+  setDriveService(driveService: GoogleDriveService): void {
+    this.driveService = driveService;
   }
 
   /**
@@ -285,6 +294,11 @@ export class CoverManager {
 
     const isDefault = source === 'default';
     await this.coverStorage.storeCover(bookId, coverResult, isDefault);
+
+    // If this is a Drive book, upload the cover to Drive and update metadata
+    if (bookId.startsWith('drive-') && this.driveService) {
+      await this.uploadCoverToDrive(bookId, coverUrl);
+    }
     
     return {
       coverUrl: coverResult.coverUrl,
@@ -292,6 +306,79 @@ export class CoverManager {
       isDefault,
       source: isDefault ? 'default' : 'extracted'
     };
+  }
+
+  /**
+   * Upload cover to Google Drive and update metadata
+   */
+  private async uploadCoverToDrive(bookId: string, coverUrl: string): Promise<void> {
+    if (!this.driveService) {
+      console.warn('Google Drive service not available for cover upload');
+      return;
+    }
+
+    try {
+      // Get the book to find its folder
+      const book = await this.indexedDB.getBook(bookId);
+      if (!book) {
+        console.error('Book not found for cover upload:', bookId);
+        return;
+      }
+
+      // Convert cover URL to blob if it's a data URL
+      let coverBlob: Blob;
+      if (coverUrl.startsWith('data:')) {
+        const response = await fetch(coverUrl);
+        coverBlob = await response.blob();
+      } else {
+        // For external URLs, fetch the image
+        const response = await fetch(coverUrl);
+        coverBlob = await response.blob();
+      }
+
+      // Convert blob to Uint8Array
+      const arrayBuffer = await coverBlob.arrayBuffer();
+      const coverData = new Uint8Array(arrayBuffer);
+
+      // Upload cover to Drive
+      const driveFileId = await this.driveService.uploadFile(
+        'cover.jpg',
+        coverData,
+        'image/jpeg',
+        book.metadata?.bookFolderId
+      );
+
+      if (driveFileId) {
+        try {
+          // Download the uploaded cover and convert to data URL
+          const coverData = await this.driveService.downloadFile(driveFileId);
+          const blob = new Blob([coverData as BlobPart], { type: 'image/jpeg' });
+          const thumbnailUrl = URL.createObjectURL(blob);
+          
+          // Update book metadata with new cover
+          const updatedMetadata = {
+            ...book.metadata,
+            cover: thumbnailUrl
+          };
+
+          // Update the book in IndexedDB
+          await this.indexedDB.updateBook(bookId, { metadata: updatedMetadata });
+
+          console.log('Cover uploaded to Drive and metadata updated:', thumbnailUrl);
+        } catch (error) {
+          console.error('Failed to download and convert cover:', error);
+          // Fallback to thumbnail URL
+          const thumbnailUrl = `https://drive.google.com/thumbnail?id=${driveFileId}&sz=w400-h600`;
+          const updatedMetadata = {
+            ...book.metadata,
+            cover: thumbnailUrl
+          };
+          await this.indexedDB.updateBook(bookId, { metadata: updatedMetadata });
+        }
+      }
+    } catch (error) {
+      console.error('Failed to upload cover to Drive:', error);
+    }
   }
 
   /**

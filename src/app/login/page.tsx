@@ -4,12 +4,13 @@
 // Handles Google OAuth sign-in
 
 import { useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/lib/auth/GoogleAuthContext';
 
 export default function LoginPage() {
   const { isAuthenticated, isLoading, signIn } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   // Redirect if already authenticated
   useEffect(() => {
@@ -17,6 +18,38 @@ export default function LoginPage() {
       router.push('/library');
     }
   }, [isAuthenticated, isLoading, router]);
+
+  // Additional check for localStorage (fallback)
+  useEffect(() => {
+    const checkStoredAuth = () => {
+      const storedToken = localStorage.getItem('google_access_token');
+      const storedUser = localStorage.getItem('google_user');
+      
+      if (storedToken && storedUser && !isAuthenticated) {
+        console.log('Found stored auth data, redirecting to library...');
+        router.push('/library');
+      }
+    };
+
+    // Check immediately
+    checkStoredAuth();
+
+    // Also check after a short delay in case the context is still loading
+    const timeoutId = setTimeout(checkStoredAuth, 1000);
+
+    return () => clearTimeout(timeoutId);
+  }, [isAuthenticated, router]);
+
+  // Check for successful authentication in URL parameters
+  useEffect(() => {
+    const code = searchParams.get('code');
+    const error = searchParams.get('error');
+    
+    if (code && !error) {
+      console.log('OAuth code detected in URL, redirecting to callback...');
+      router.push(`/auth/callback?code=${code}`);
+    }
+  }, [searchParams, router]);
 
   const handleSignIn = async () => {
     try {

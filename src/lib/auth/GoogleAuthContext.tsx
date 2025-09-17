@@ -94,6 +94,26 @@ export function AuthProvider({ children }: AuthProviderProps) {
     };
 
     initializeAuth();
+
+    // Listen for custom auth success event (when user returns from OAuth callback)
+    const handleAuthSuccess = (e: CustomEvent) => {
+      console.log('Google auth success event received, updating auth state...');
+      const { accessToken: newToken, user: newUser } = e.detail;
+      
+      setAccessToken(newToken);
+      setUser(newUser);
+      setIsAuthenticated(true);
+      setIsLoading(false);
+      
+      // Get drive info
+      verifyTokenAndGetDriveInfo(newToken);
+    };
+
+    window.addEventListener('googleAuthSuccess', handleAuthSuccess as EventListener);
+
+    return () => {
+      window.removeEventListener('googleAuthSuccess', handleAuthSuccess as EventListener);
+    };
   }, []);
 
   // Verify token and get drive info

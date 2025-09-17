@@ -62,6 +62,12 @@ export default function AuthCallbackPage() {
             }
             
             setStatus('success');
+            
+            // Trigger a custom event to notify the auth context
+            window.dispatchEvent(new CustomEvent('googleAuthSuccess', {
+              detail: { accessToken: data.access_token, user: userData }
+            }));
+            
             setTimeout(() => {
               router.push('/library');
             }, 1000);
