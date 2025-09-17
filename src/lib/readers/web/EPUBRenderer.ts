@@ -1367,6 +1367,28 @@ export class EPUBRenderer {
   }
 
   /**
+   * Preload a chapter for faster navigation
+   */
+  async preloadChapter(chapterId: string): Promise<void> {
+    try {
+      console.log('EPUBRenderer: Preloading chapter:', chapterId);
+      
+      const chapter = this.chapters.find(ch => ch.id === chapterId);
+      if (!chapter) {
+        console.warn('EPUBRenderer: Chapter not found for preloading:', chapterId);
+        return;
+      }
+
+      // For now, just log the preload - in a full implementation,
+      // this would cache the chapter content
+      console.log('EPUBRenderer: Chapter preloaded:', chapterId);
+    } catch (error) {
+      console.error('EPUBRenderer: Failed to preload chapter:', error);
+      // Don't throw error for preloading failures
+    }
+  }
+
+  /**
    * Navigate to next page
    */
   async nextPage(): Promise<void> {

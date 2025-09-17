@@ -26,6 +26,7 @@ export default function AuthCallbackPage() {
 
       if (code) {
         try {
+          console.log('AuthCallback: Exchanging code for tokens...');
           // Exchange code for tokens
           const response = await fetch('/api/auth/token', {
             method: 'POST',
@@ -35,6 +36,7 @@ export default function AuthCallbackPage() {
             body: JSON.stringify({ code }),
           });
 
+          console.log('AuthCallback: Token exchange response status:', response.status);
           if (response.ok) {
             const data = await response.json();
             
@@ -45,20 +47,26 @@ export default function AuthCallbackPage() {
             }
             
             // Get user info and store it
+            console.log('AuthCallback: Fetching user info...');
+            let userData = null;
             const userResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
               headers: {
                 'Authorization': `Bearer ${data.access_token}`
               }
             });
             
+            console.log('AuthCallback: User info response status:', userResponse.status);
             if (userResponse.ok) {
-              const userData = await userResponse.json();
+              userData = await userResponse.json();
+              console.log('AuthCallback: User data received:', { id: userData.id, email: userData.email, name: userData.name });
               localStorage.setItem('google_user', JSON.stringify({
                 id: userData.id,
                 email: userData.email,
                 name: userData.name,
                 picture: userData.picture
               }));
+            } else {
+              console.warn('AuthCallback: Failed to fetch user info:', userResponse.status, await userResponse.text());
             }
             
             setStatus('success');

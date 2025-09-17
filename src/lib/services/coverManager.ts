@@ -3,7 +3,7 @@
 
 import { Book } from '@/types';
 import { CoverExtractor, CoverExtractionResult } from './coverExtractor';
-import { CoverStorageService, StoredCover } from './coverStorage';
+import { CoverStorageService } from './coverStorage';
 import { IndexedDBService } from '@/lib/storage/indexedDB';
 import { GoogleDriveService } from './googleDriveService';
 
@@ -62,7 +62,7 @@ export class CoverManager {
       }
       
       const data = await response.json();
-      return data.results.map((photo: any) => photo.urls.regular);
+      return data.results.map((photo: { urls: { regular: string } }) => photo.urls.regular);
     } catch (error) {
       console.warn('Cover search failed, using mock data:', error);
       return this.getMockCoverUrls(query);
@@ -352,7 +352,7 @@ export class CoverManager {
         try {
           // Download the uploaded cover and convert to data URL
           const coverData = await this.driveService.downloadFile(driveFileId);
-          const blob = new Blob([coverData as BlobPart], { type: 'image/jpeg' });
+          const blob = new Blob([coverData], { type: 'image/jpeg' });
           const thumbnailUrl = URL.createObjectURL(blob);
           
           // Update book metadata with new cover

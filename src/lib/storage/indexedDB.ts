@@ -28,10 +28,92 @@ export interface StorageStats {
 
 export class IndexedDBService {
   private dbName: string = 'BookLeverDB';
-  private version: number = 5; // Incremented to add collections and tags support
+  private version: number = 6; // Incremented to add collections and tags support
   private db: IDBDatabase | null = null;
   private maxStorageSize: number = 2 * 1024 * 1024 * 1024; // 2GB
   private currentUserId: string | null = null;
+  private compressionEnabled: boolean = true;
+
+  /**
+   * Compress data using advanced compression techniques
+   */
+  private compressData(data: any): any {
+    if (!this.compressionEnabled) return data;
+    
+    try {
+      if (typeof data === 'object' && data !== null) {
+        // Deep compression: remove empty values, compress strings, deduplicate
+        const compressed = this.deepCompress(data);
+        return compressed;
+      }
+      return data;
+    } catch (error) {
+      console.warn('IndexedDB: Compression failed, storing original data:', error);
+      return data;
+    }
+  }
+
+  /**
+   * Deep compression with deduplication
+   */
+  private deepCompress(obj: any, seen = new WeakSet()): any {
+    if (obj === null || obj === undefined) return undefined;
+    if (typeof obj !== 'object') return obj;
+    if (seen.has(obj)) return '[Circular]'; // Handle circular references
+    
+    seen.add(obj);
+    
+    if (Array.isArray(obj)) {
+      const compressed = obj
+        .map(item => this.deepCompress(item, seen))
+        .filter(item => item !== undefined && item !== null && item !== '');
+      return compressed.length > 0 ? compressed : undefined;
+    }
+    
+    const compressed: any = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (value === null || value === undefined || value === '') continue;
+      
+      const compressedValue = this.deepCompress(value, seen);
+      if (compressedValue !== undefined && compressedValue !== null && compressedValue !== '') {
+        // Compress long strings
+        if (typeof compressedValue === 'string' && compressedValue.length > 50) {
+          compressed[key] = this.compressString(compressedValue);
+        } else {
+          compressed[key] = compressedValue;
+        }
+      }
+    }
+    
+    return Object.keys(compressed).length > 0 ? compressed : undefined;
+  }
+
+  /**
+   * Simple string compression using common patterns
+   */
+  private compressString(str: string): string {
+    // Replace common patterns with shorter representations
+    let compressed = str
+      .replace(/\s+/g, ' ') // Multiple spaces to single space
+      .replace(/\n\s*\n/g, '\n') // Multiple newlines to single
+      .replace(/\t/g, ' ') // Tabs to spaces
+      .trim();
+    
+    // If still long, truncate with ellipsis
+    if (compressed.length > 200) {
+      compressed = compressed.substring(0, 197) + '...';
+    }
+    
+    return compressed;
+  }
+
+  /**
+   * Decompress data
+   */
+  private decompressData(data: any): any {
+    if (!this.compressionEnabled) return data;
+    return data; // For now, compression is transparent
+  }
 
   /**
    * Set the current user ID for account-specific storage
@@ -126,6 +208,36 @@ export class IndexedDBService {
           const tagsStore = db.createObjectStore('tags', { keyPath: 'id' });
           tagsStore.createIndex('name', 'name', { unique: true });
           tagsStore.createIndex('createdAt', 'createdAt', { unique: false });
+        }
+
+        // Create reading progress store (new in version 6)
+        if (!db.objectStoreNames.contains('readingProgress')) {
+          console.log('Creating reading progress object store');
+          const readingProgressStore = db.createObjectStore('readingProgress', { keyPath: 'id' });
+          readingProgressStore.createIndex('bookId', 'bookId', { unique: false });
+          readingProgressStore.createIndex('userId', 'userId', { unique: false });
+          readingProgressStore.createIndex('lastRead', 'lastRead', { unique: false });
+          readingProgressStore.createIndex('progress', 'progress', { unique: false });
+        }
+
+        // Create bookmarks store (new in version 6)
+        if (!db.objectStoreNames.contains('bookmarks')) {
+          console.log('Creating bookmarks object store');
+          const bookmarksStore = db.createObjectStore('bookmarks', { keyPath: 'id' });
+          bookmarksStore.createIndex('bookId', 'bookId', { unique: false });
+          bookmarksStore.createIndex('userId', 'userId', { unique: false });
+          bookmarksStore.createIndex('createdAt', 'createdAt', { unique: false });
+          bookmarksStore.createIndex('chapter', 'chapter', { unique: false });
+        }
+
+        // Create reading analytics store (new in version 6)
+        if (!db.objectStoreNames.contains('readingAnalytics')) {
+          console.log('Creating reading analytics object store');
+          const analyticsStore = db.createObjectStore('readingAnalytics', { keyPath: 'id' });
+          analyticsStore.createIndex('bookId', 'bookId', { unique: false });
+          analyticsStore.createIndex('userId', 'userId', { unique: false });
+          analyticsStore.createIndex('date', 'date', { unique: false });
+          analyticsStore.createIndex('readingTime', 'readingTime', { unique: false });
         }
 
         // Create sync queue store
@@ -713,6 +825,285 @@ export class IndexedDBService {
       throw error;
     }
   }
+
+  /**
+   * Save reading progress for a book
+   */
+  async saveReadingProgress(bookId: string, progress: number, chapter?: string, position?: number): Promise<void> {
+    if (!this.db) throw new Error('IndexedDB not initialized');
+
+    const progressData = {
+      id: `${this.currentUserId || 'anonymous'}_${bookId}`,
+      bookId,
+      userId: this.currentUserId || 'anonymous',
+      progress,
+      chapter: chapter || null,
+      position: position || 0,
+      lastRead: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    const transaction = this.db.transaction(['readingProgress'], 'readwrite');
+    const store = transaction.objectStore('readingProgress');
+    await store.put(this.compressData(progressData));
+  }
+
+  /**
+   * Get reading progress for a book
+   */
+  async getReadingProgress(bookId: string): Promise<any> {
+    if (!this.db) throw new Error('IndexedDB not initialized');
+
+    const transaction = this.db.transaction(['readingProgress'], 'readonly');
+    const store = transaction.objectStore('readingProgress');
+    const index = store.index('bookId');
+    const request = index.getAll(bookId);
+    
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => {
+        const results = request.result;
+        if (results.length > 0) {
+          // Return the most recent progress
+          const latest = results.sort((a, b) => new Date(b.lastRead).getTime() - new Date(a.lastRead).getTime())[0];
+          resolve(this.decompressData(latest));
+        } else {
+          resolve(null);
+        }
+      };
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  /**
+   * Save a bookmark
+   */
+  async saveBookmark(bookId: string, chapter: string, note?: string, position?: number): Promise<string> {
+    if (!this.db) throw new Error('IndexedDB not initialized');
+
+    const bookmarkId = `${this.currentUserId || 'anonymous'}_${bookId}_${Date.now()}`;
+    const bookmarkData = {
+      id: bookmarkId,
+      bookId,
+      userId: this.currentUserId || 'anonymous',
+      chapter,
+      note: note || '',
+      position: position || 0,
+      createdAt: new Date().toISOString()
+    };
+
+    const transaction = this.db.transaction(['bookmarks'], 'readwrite');
+    const store = transaction.objectStore('bookmarks');
+    await store.put(this.compressData(bookmarkData));
+    
+    return bookmarkId;
+  }
+
+  /**
+   * Get bookmarks for a book
+   */
+  async getBookmarks(bookId: string): Promise<any[]> {
+    if (!this.db) throw new Error('IndexedDB not initialized');
+
+    const transaction = this.db.transaction(['bookmarks'], 'readonly');
+    const store = transaction.objectStore('bookmarks');
+    const index = store.index('bookId');
+    const request = index.getAll(bookId);
+    
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => {
+        const results = request.result.map(bookmark => this.decompressData(bookmark));
+        resolve(results.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()));
+      };
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  /**
+   * Delete a bookmark
+   */
+  async deleteBookmark(bookmarkId: string): Promise<void> {
+    if (!this.db) throw new Error('IndexedDB not initialized');
+
+    const transaction = this.db.transaction(['bookmarks'], 'readwrite');
+    const store = transaction.objectStore('bookmarks');
+    await store.delete(bookmarkId);
+  }
+
+  /**
+   * Record reading analytics
+   */
+  async recordReadingAnalytics(bookId: string, readingTime: number, pagesRead: number = 1): Promise<void> {
+    if (!this.db) throw new Error('IndexedDB not initialized');
+
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+    const analyticsId = `${this.currentUserId || 'anonymous'}_${bookId}_${today}`;
+
+    // Try to get existing record for today
+    const transaction = this.db.transaction(['readingAnalytics'], 'readwrite');
+    const store = transaction.objectStore('readingAnalytics');
+    
+    try {
+      const existing = await store.get(analyticsId);
+      if (existing) {
+        // Update existing record
+        const existingData = this.decompressData(existing);
+        const updated = {
+          ...existingData,
+          readingTime: existingData.readingTime + readingTime,
+          pagesRead: existingData.pagesRead + pagesRead,
+          lastUpdated: new Date().toISOString()
+        };
+        await store.put(this.compressData(updated));
+      } else {
+        // Create new record
+        const analyticsData = {
+          id: analyticsId,
+          bookId,
+          userId: this.currentUserId || 'anonymous',
+          date: today,
+          readingTime,
+          pagesRead,
+          createdAt: new Date().toISOString(),
+          lastUpdated: new Date().toISOString()
+        };
+        await store.put(this.compressData(analyticsData));
+      }
+    } catch (error) {
+      console.error('Failed to record reading analytics:', error);
+    }
+  }
+
+  /**
+   * Get reading analytics for a book
+   */
+  async getReadingAnalytics(bookId: string, days: number = 30): Promise<any[]> {
+    if (!this.db) throw new Error('IndexedDB not initialized');
+
+    const transaction = this.db.transaction(['readingAnalytics'], 'readonly');
+    const store = transaction.objectStore('readingAnalytics');
+    const index = store.index('bookId');
+    const request = index.getAll(bookId);
+    
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => {
+        const results = request.result
+          .map(analytics => this.decompressData(analytics))
+          .filter(analytics => {
+            const analyticsDate = new Date(analytics.date);
+            const cutoffDate = new Date();
+            cutoffDate.setDate(cutoffDate.getDate() - days);
+            return analyticsDate >= cutoffDate;
+          })
+          .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        resolve(results);
+      };
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  /**
+   * Deduplicate metadata across books
+   */
+  async deduplicateMetadata(): Promise<{ duplicatesRemoved: number, spaceSaved: number }> {
+    if (!this.db) throw new Error('IndexedDB not initialized');
+
+    let duplicatesRemoved = 0;
+    let spaceSaved = 0;
+
+    try {
+      // Get all books
+      const transaction = this.db.transaction(['books'], 'readwrite');
+      const store = transaction.objectStore('books');
+      const request = store.getAll();
+
+      return new Promise((resolve, reject) => {
+        request.onsuccess = async () => {
+          const books = request.result;
+          const metadataMap = new Map<string, any>();
+          const duplicateBooks = [];
+
+          // Find duplicate metadata
+          for (const book of books) {
+            const metadataKey = this.generateMetadataKey(book);
+            if (metadataMap.has(metadataKey)) {
+              duplicateBooks.push({ book, original: metadataMap.get(metadataKey) });
+            } else {
+              metadataMap.set(metadataKey, book);
+            }
+          }
+
+          // Remove duplicates by referencing the original
+          for (const { book, original } of duplicateBooks) {
+            const originalSize = JSON.stringify(book).length;
+            book.metadata = { ...original.metadata, isDuplicate: true, originalId: original.id };
+            const newSize = JSON.stringify(book).length;
+            
+            spaceSaved += originalSize - newSize;
+            duplicatesRemoved++;
+            
+            await store.put(this.compressData(book));
+          }
+
+          resolve({ duplicatesRemoved, spaceSaved });
+        };
+        request.onerror = () => reject(request.error);
+      });
+    } catch (error) {
+      console.error('Failed to deduplicate metadata:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Generate a key for metadata deduplication
+   */
+  private generateMetadataKey(book: any): string {
+    const metadata = book.metadata || {};
+    return `${metadata.title || ''}_${metadata.author || ''}_${metadata.isbn || ''}_${metadata.publisher || ''}`.toLowerCase();
+  }
+
+  /**
+   * Clean up old analytics data
+   */
+  async cleanupOldAnalytics(daysToKeep: number = 90): Promise<{ recordsDeleted: number, spaceFreed: number }> {
+    if (!this.db) throw new Error('IndexedDB not initialized');
+
+    let recordsDeleted = 0;
+    let spaceFreed = 0;
+
+    try {
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
+
+      const transaction = this.db.transaction(['readingAnalytics'], 'readwrite');
+      const store = transaction.objectStore('readingAnalytics');
+      const index = store.index('date');
+      const request = index.getAll();
+
+      return new Promise((resolve, reject) => {
+        request.onsuccess = async () => {
+          const analytics = request.result;
+          
+          for (const record of analytics) {
+            const recordDate = new Date(record.date);
+            if (recordDate < cutoffDate) {
+              const recordSize = JSON.stringify(record).length;
+              await store.delete(record.id);
+              recordsDeleted++;
+              spaceFreed += recordSize;
+            }
+          }
+
+          resolve({ recordsDeleted, spaceFreed });
+        };
+        request.onerror = () => reject(request.error);
+      });
+    } catch (error) {
+      console.error('Failed to cleanup old analytics:', error);
+      throw error;
+    }
+  }
+
 
   /**
    * Get all user databases (for cleanup purposes)

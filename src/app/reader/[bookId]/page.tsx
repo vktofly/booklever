@@ -12,6 +12,7 @@ import { BookUploadService } from '@/lib/services/bookUpload';
 import { IndexedDBService } from '@/lib/storage/indexedDB';
 import { GoogleDriveService } from '@/lib/services/googleDriveService';
 import { HighlightSyncService } from '@/lib/services/highlightSyncService';
+import { ReadingAnalyticsService } from '@/lib/services/readingAnalytics';
 import { Navigation } from '@/components/common/Navigation';
 import { HighlightManager } from '@/components/reader/HighlightManager';
 import { SyncStatus } from '@/components/sync/SyncStatus';
@@ -34,6 +35,7 @@ export default function ReaderPage() {
   const [indexedDB, setIndexedDB] = useState<IndexedDBService | null>(null);
   const [driveService, setDriveService] = useState<GoogleDriveService | null>(null);
   const [syncService, setSyncService] = useState<HighlightSyncService | null>(null);
+  const [readingAnalytics, setReadingAnalytics] = useState<ReadingAnalyticsService | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showHighlights, setShowHighlights] = useState(false);
   const [syncStatus, setSyncStatus] = useState({
@@ -46,8 +48,11 @@ export default function ReaderPage() {
   // Initialize upload service and load book data
   useEffect(() => {
     const initializeAndLoadBook = async () => {
+      console.log('ReaderPage: Starting initialization with bookId:', bookId);
+      console.log('ReaderPage: Auth status - isAuthenticated:', isAuthenticated, 'accessToken:', !!accessToken, 'user:', user?.id);
+      
       if (!bookId) {
-        console.log('Missing bookId:', bookId);
+        console.log('ReaderPage: Missing bookId:', bookId);
         return;
       }
 
@@ -82,54 +87,74 @@ export default function ReaderPage() {
         }
         
         await db.initialize();
+        console.log('ReaderPage: IndexedDB initialized successfully');
         setIndexedDB(db);
         
         // Initialize Google Drive service if authenticated
+        let drive: GoogleDriveService | null = null;
         if (accessToken) {
           console.log('Initializing Google Drive service...');
-          const drive = new GoogleDriveService(accessToken);
+          drive = new GoogleDriveService(accessToken);
           setDriveService(drive);
           
-          // Initialize sync service
-          console.log('Initializing sync service...');
-          const sync = new HighlightSyncService(db, drive);
-          await sync.initialize();
-          setSyncService(sync);
+            // Initialize sync service
+            console.log('Initializing sync service...');
+            const sync = new HighlightSyncService(db, drive);
+            await sync.initialize();
+            setSyncService(sync);
+
+            // Initialize reading analytics service
+            console.log('Initializing reading analytics service...');
+            const analytics = new ReadingAnalyticsService(db);
+            setReadingAnalytics(analytics);
         }
         
-        // Load book data
-        console.log('Loading book with ID:', bookId);
-        let storedBook = await service.getBook(bookId as string);
-        console.log('Retrieved book:', storedBook);
+        // Wait a moment for IndexedDB to be fully ready
+        console.log('ReaderPage: Waiting for IndexedDB to be fully ready...');
+        await new Promise(resolve => setTimeout(resolve, 100));
         
-        if (storedBook) {
-          setBook(storedBook);
-          setBookData(storedBook.fileData);
-          console.log('Book loaded successfully, fileData size:', storedBook.fileData?.length);
-          
-          // Load existing highlights from IndexedDB
-          console.log('Loading highlights for book:', bookId);
-          const existingHighlights = await db.getHighlightsForBook(bookId as string);
-          console.log('Retrieved highlights:', existingHighlights);
-          setHighlights(existingHighlights);
-        } else if (bookId.toString().startsWith('drive-') && driveService) {
+        // Load book data
+        console.log('ReaderPage: Loading book with ID:', bookId);
+        let storedBook = await service.getBook(bookId as string);
+        console.log('ReaderPage: Retrieved book from local storage:', storedBook);
+        
+            if (storedBook) {
+              setBook(storedBook);
+              setBookData(storedBook.fileData);
+              console.log('Book loaded successfully, fileData size:', storedBook.fileData?.length);
+              
+              // Load existing highlights from IndexedDB
+              console.log('Loading highlights for book:', bookId);
+              const existingHighlights = await db.getHighlightsForBook(bookId as string);
+              console.log('Retrieved highlights:', existingHighlights);
+              setHighlights(existingHighlights);
+
+              // Start reading session for analytics
+              if (user?.id) {
+                console.log('Starting reading session for analytics');
+                const analytics = new ReadingAnalyticsService(db);
+                await analytics.startReadingSession(bookId as string, user.id);
+                setReadingAnalytics(analytics);
+              }
+        } else if (bookId.toString().startsWith('drive-') && drive) {
           // Book is from Google Drive but not downloaded yet
-          console.log('Book is from Google Drive, downloading...');
+          console.log('ReaderPage: Book is from Google Drive, downloading...');
+          console.log('ReaderPage: Drive service available:', !!drive);
           try {
             const downloadProgress = (progress: number) => {
-              console.log('Download progress:', progress + '%');
+              console.log('ReaderPage: Download progress:', progress + '%');
             };
             
             storedBook = await service.downloadBookFromDrive(
               bookId as string, 
-              driveService, 
+              drive, 
               downloadProgress
             );
             
             if (storedBook) {
               setBook(storedBook);
               setBookData(storedBook.fileData);
-              console.log('Book downloaded and loaded successfully');
+              console.log('ReaderPage: Book downloaded and loaded successfully');
               
               // Load existing highlights from IndexedDB
               const existingHighlights = await db.getHighlightsForBook(bookId as string);
@@ -138,11 +163,13 @@ export default function ReaderPage() {
               throw new Error('Failed to download book from Drive');
             }
           } catch (downloadError) {
-            console.error('Failed to download book from Drive:', downloadError);
+            console.error('ReaderPage: Failed to download book from Drive:', downloadError);
             router.push('/library');
           }
         } else {
-          console.log('Book not found, redirecting to library');
+          console.log('ReaderPage: Book not found, redirecting to library');
+          console.log('ReaderPage: Book ID starts with drive-:', bookId.toString().startsWith('drive-'));
+          console.log('ReaderPage: Drive service available:', !!drive);
           // Book not found, redirect to library
           router.push('/library');
         }
@@ -156,6 +183,15 @@ export default function ReaderPage() {
 
     initializeAndLoadBook();
   }, [accessToken, bookId, router]);
+
+  // Cleanup reading session on unmount
+  useEffect(() => {
+    return () => {
+      if (readingAnalytics) {
+        readingAnalytics.endReadingSession();
+      }
+    };
+  }, [readingAnalytics]);
 
   // Redirect if not authenticated
   useEffect(() => {

@@ -766,6 +766,38 @@ export class BookUploadService {
   }
 
   /**
+   * Get books with pagination for better performance with large libraries
+   */
+  async getBooksPaginated(driveService?: GoogleDriveService, pageToken?: string, pageSize: number = 20): Promise<{ books: Book[], nextPageToken?: string, totalCount?: number }> {
+    try {
+      if (!driveService) {
+        console.warn('BookUploadService: No Google Drive service available');
+        return { books: [], totalCount: 0 };
+      }
+
+      console.log('BookUploadService: Getting books paginated from Google Drive...', { pageToken, pageSize });
+      
+      // Get remote books from Google Drive with pagination
+      const result = await driveService.listBooksPaginated(pageToken, pageSize);
+      console.log('BookUploadService: Drive files returned:', result.files.length);
+      
+      const remoteBooks = result.files.map(file => GoogleDriveService.driveFileToBook(file));
+
+      console.log('BookUploadService: Converted to books:', remoteBooks.length);
+      console.log('BookUploadService: Book details:', remoteBooks.map(b => ({ id: b.id, title: b.title, isFromDrive: b.isFromDrive })));
+      
+      return {
+        books: remoteBooks,
+        nextPageToken: result.nextPageToken,
+        totalCount: result.totalCount
+      };
+    } catch (error) {
+      console.error('BookUploadService: Failed to get books from Drive:', error);
+      return { books: [], totalCount: 0 };
+    }
+  }
+
+  /**
    * Download book from Google Drive and store locally
    */
   async downloadBookFromDrive(

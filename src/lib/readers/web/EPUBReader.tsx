@@ -86,6 +86,8 @@ export function EPUBReader({
   const [bookmarks, setBookmarks] = useState<Array<{ id: string; title: string; position: string; page: number; createdAt: Date }>>([]);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [totalPages, setTotalPages] = useState<number>(237);
+  const [preloadedChapters, setPreloadedChapters] = useState<Set<string>>(new Set());
+  const [preloadingQueue, setPreloadingQueue] = useState<string[]>([]);
   const [showSidebar, setShowSidebar] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<'contents' | 'bookmarks' | 'display'>('contents');
   const [showHeader, setShowHeader] = useState(true);
@@ -100,6 +102,77 @@ export function EPUBReader({
     memoryUsage: 0,
     lastUpdate: Date.now()
   });
+
+  // Preloading functions
+  const preloadChapter = useCallback(async (chapterId: string) => {
+    if (!epubRenderer || preloadedChapters.has(chapterId)) return;
+
+    try {
+      console.log('EPUBReader: Preloading chapter:', chapterId);
+      setPreloadingQueue(prev => [...prev, chapterId]);
+      
+      // Preload the chapter content
+      await epubRenderer.preloadChapter(chapterId);
+      
+      setPreloadedChapters(prev => new Set([...prev, chapterId]));
+      setPreloadingQueue(prev => prev.filter(id => id !== chapterId));
+      
+      console.log('EPUBReader: Chapter preloaded:', chapterId);
+    } catch (error) {
+      console.error('EPUBReader: Failed to preload chapter:', chapterId, error);
+      setPreloadingQueue(prev => prev.filter(id => id !== chapterId));
+    }
+  }, [epubRenderer, preloadedChapters]);
+
+  const preloadAdjacentChapters = useCallback(async (currentChapterId: string) => {
+    if (!chapters.length) return;
+
+    const currentIndex = chapters.findIndex(ch => ch.id === currentChapterId);
+    if (currentIndex === -1) return;
+
+    // Preload next 2 chapters
+    for (let i = 1; i <= 2; i++) {
+      const nextIndex = currentIndex + i;
+      if (nextIndex < chapters.length) {
+        const nextChapter = chapters[nextIndex];
+        if (!preloadedChapters.has(nextChapter.id)) {
+          preloadChapter(nextChapter.id);
+        }
+      }
+    }
+
+    // Preload previous 1 chapter
+    const prevIndex = currentIndex - 1;
+    if (prevIndex >= 0) {
+      const prevChapter = chapters[prevIndex];
+      if (!preloadedChapters.has(prevChapter.id)) {
+        preloadChapter(prevChapter.id);
+      }
+    }
+  }, [chapters, preloadedChapters, preloadChapter]);
+
+  const preloadBasedOnReadingSpeed = useCallback(async (currentChapterId: string) => {
+    if (!chapters.length) return;
+
+    const currentIndex = chapters.findIndex(ch => ch.id === currentChapterId);
+    if (currentIndex === -1) return;
+
+    // Calculate reading speed (pages per minute)
+    const readingSpeed = readingTime > 0 ? (currentPage / (readingTime / 60)) : 1;
+    
+    // Preload more chapters if user reads fast
+    const chaptersToPreload = Math.min(5, Math.ceil(readingSpeed / 2));
+    
+    for (let i = 1; i <= chaptersToPreload; i++) {
+      const nextIndex = currentIndex + i;
+      if (nextIndex < chapters.length) {
+        const nextChapter = chapters[nextIndex];
+        if (!preloadedChapters.has(nextChapter.id)) {
+          preloadChapter(nextChapter.id);
+        }
+      }
+    }
+  }, [chapters, preloadedChapters, preloadChapter, readingTime, currentPage]);
 
   // Initialize the Readium renderer with better error handling
   useEffect(() => {
@@ -299,10 +372,14 @@ export function EPUBReader({
     try {
       await epubRenderer.navigateToChapter(chapterId);
       setCurrentChapter(chapterId);
+      
+      // Trigger preloading after chapter change
+      preloadAdjacentChapters(chapterId);
+      preloadBasedOnReadingSpeed(chapterId);
     } catch (error) {
       console.error('EPUBReader: Failed to navigate to chapter:', error);
     }
-  }, [epubRenderer, isRendered]);
+  }, [epubRenderer, isRendered, preloadAdjacentChapters, preloadBasedOnReadingSpeed]);
 
   // Optimized reading analytics with memoization
   const updateAnalytics = useCallback(() => {
@@ -601,6 +678,16 @@ export function EPUBReader({
           onProfile={handleProfile}
           onFullscreen={handleFullscreen}
         />
+      )}
+
+      {/* Preloading Indicator */}
+      {preloadingQueue.length > 0 && (
+        <div className="absolute top-20 right-4 z-50 bg-blue-500 text-white px-3 py-2 rounded-lg shadow-lg flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+          <span className="text-sm font-medium">
+            Preloading {preloadingQueue.length} chapter{preloadingQueue.length > 1 ? 's' : ''}...
+          </span>
+        </div>
       )}
 
       {/* Main reading area */}

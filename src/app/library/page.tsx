@@ -43,6 +43,16 @@ export default function LibraryPage() {
   const [sortBy, setSortBy] = useState<'title' | 'author' | 'uploadDate' | 'lastRead' | 'progress' | 'rating' | 'fileSize'>('title');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [isRefreshingCovers, setIsRefreshingCovers] = useState(false);
+  const [isLoadingBooks, setIsLoadingBooks] = useState(true);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [currentPage, setCurrentPage] = useState(0);
+  const [nextPageToken, setNextPageToken] = useState<string | undefined>(undefined);
+  const [hasMoreBooks, setHasMoreBooks] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [visibleBooks, setVisibleBooks] = useState<Book[]>([]);
+  const [containerRef, setContainerRef] = useState<HTMLDivElement | null>(null);
+  const [searchResults, setSearchResults] = useState<Book[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
 
   // Initialize services
   useEffect(() => {
@@ -98,12 +108,44 @@ export default function LibraryPage() {
         
         setCoverManagerService(coverMgr);
 
-        // Load books (local + remote metadata)
-        console.log('Library: About to load books with driveSvc:', !!driveSvc);
-        const allBooks = await uploadSvc.getAllBooksWithDrive(driveSvc);
-        console.log('Library: Loaded books (local + remote):', allBooks);
-        console.log('Library: Number of books found:', allBooks.length);
-        setBooks(allBooks);
+      // Load books (local + remote metadata) with pagination
+      console.log('Library: About to load books with driveSvc:', !!driveSvc);
+      console.log('Library: Setting isLoadingBooks to true (initial load)');
+      setIsLoadingBooks(true);
+      setLoadingProgress(0);
+      
+      try {
+        // Simulate progress updates
+        const progressInterval = setInterval(() => {
+          setLoadingProgress(prev => Math.min(prev + 10, 90));
+        }, 200);
+        
+        const result = await uploadSvc.getBooksPaginated(driveSvc, undefined, 20);
+        clearInterval(progressInterval);
+        
+        console.log('Library: Initial load - Loaded books (local + remote):', result.books);
+        console.log('Library: Initial load - Number of books found:', result.books.length);
+        console.log('Library: Initial load - Next page token:', result.nextPageToken);
+        
+        // Show books progressively as they load
+        setBooks(result.books);
+        setNextPageToken(result.nextPageToken);
+        setHasMoreBooks(!!result.nextPageToken);
+        setCurrentPage(0);
+        
+        // Complete progress
+        setLoadingProgress(100);
+        
+        // Mark loading as complete after a brief delay
+        setTimeout(() => {
+          setIsLoadingBooks(false);
+          console.log('Library: Books loaded successfully, loading state cleared');
+        }, 500);
+      } catch (error) {
+        console.error('Library: Failed to load books:', error);
+        setIsLoadingBooks(false);
+        setLoadingProgress(0);
+      }
 
         // Load collections and tags
         const loadedCollections = await uploadSvc.getAllCollections();
@@ -116,6 +158,19 @@ export default function LibraryPage() {
     };
     initializeServices();
   }, [accessToken]);
+
+  // Virtual scrolling effect - show only visible books
+  useEffect(() => {
+    if (books.length === 0) {
+      setVisibleBooks([]);
+      return;
+    }
+
+    // For now, show all books (can be optimized with intersection observer later)
+    // This is a simple implementation - for true virtual scrolling, we'd need
+    // to calculate which books are visible based on scroll position
+    setVisibleBooks(books);
+  }, [books]);
 
   // Redirect if not authenticated
   useEffect(() => {
@@ -175,15 +230,101 @@ export default function LibraryPage() {
   };
 
   const loadBooks = async () => {
+    console.log('Library: loadBooks called, uploadService available:', !!uploadService);
     if (uploadService) {
-      const allBooks = await uploadService.getAllBooksWithDrive(driveService ?? undefined);
-      console.log('Loaded books (local + remote):', allBooks);
-      setBooks(allBooks);
+      console.log('Library: Setting isLoadingBooks to true');
+      setIsLoadingBooks(true);
+      try {
+        const result = await uploadService.getBooksPaginated(driveService ?? undefined, undefined, 20);
+        console.log('Library: loadBooks - Loaded books (local + remote):', result.books);
+        setBooks(result.books);
+        setNextPageToken(result.nextPageToken);
+        setHasMoreBooks(!!result.nextPageToken);
+        setCurrentPage(0);
+      } finally {
+        console.log('Library: Setting isLoadingBooks to false');
+        setIsLoadingBooks(false);
+      }
+    } else {
+      console.log('Library: loadBooks called but uploadService not available');
     }
   };
 
+  const loadMoreBooks = async () => {
+    if (!uploadService || !hasMoreBooks || isLoadingMore) {
+      return;
+    }
+
+    console.log('Library: Loading more books...', { nextPageToken, currentPage });
+    setIsLoadingMore(true);
+    
+    try {
+      const result = await uploadService.getBooksPaginated(driveService ?? undefined, nextPageToken, 20);
+      console.log('Library: Loaded more books:', result.books.length);
+      
+      setBooks(prevBooks => [...prevBooks, ...result.books]);
+      setNextPageToken(result.nextPageToken);
+      setHasMoreBooks(!!result.nextPageToken);
+      setCurrentPage(prev => prev + 1);
+    } catch (error) {
+      console.error('Library: Failed to load more books:', error);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
+
+  // Debounced search function
+  const performSearch = useCallback(async (query: string) => {
+    if (!query.trim()) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+    console.log('Library: Performing search for:', query);
+
+    try {
+      // For now, search only in loaded books
+      // In a full implementation, you'd want to search across all books in Drive
+      const results = books.filter(book => 
+        book.title.toLowerCase().includes(query.toLowerCase()) ||
+        book.author.toLowerCase().includes(query.toLowerCase()) ||
+        book.tags?.some(tag => tag.toLowerCase().includes(query.toLowerCase())) ||
+        book.notes?.toLowerCase().includes(query.toLowerCase())
+      );
+      
+      setSearchResults(results);
+      console.log('Library: Search results:', results.length);
+    } catch (error) {
+      console.error('Library: Search failed:', error);
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  }, [books]);
+
+  // Debounce search input
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      performSearch(searchQuery);
+    }, 300); // 300ms debounce
+
+    return () => clearTimeout(timeoutId);
+  }, [searchQuery, performSearch]);
+
   const handleBookClick = (book: Book) => {
+    console.log('Book clicked:', book.title, 'ID:', book.id, 'Type:', book.fileType);
+    console.log('Book details:', {
+      id: book.id,
+      title: book.title,
+      fileType: book.fileType,
+      isFromDrive: book.isFromDrive,
+      isDownloaded: book.isDownloaded
+    });
+    
     // Navigate to reader page with book
+    console.log('Navigating to reader page:', `/reader/${book.id}`);
     router.push(`/reader/${book.id}`);
   };
 
@@ -196,10 +337,11 @@ export default function LibraryPage() {
 
   // Filter and sort books
   const filteredBooks = useMemo(() => {
-    let filtered = books;
+    // Use search results if searching, otherwise use visible books
+    let filtered = searchQuery.trim() ? searchResults : visibleBooks;
 
-    // Apply search query filter
-    if (searchQuery.trim()) {
+    // Apply search query filter (if not already filtered by search results)
+    if (searchQuery.trim() && searchResults.length === 0) {
       const query = searchQuery.toLowerCase();
       filtered = filtered.filter(book => 
         book.title.toLowerCase().includes(query) ||
@@ -751,7 +893,48 @@ export default function LibraryPage() {
             </div>
           </div>
           
-          {filteredBooks.length === 0 ? (
+      {isLoadingBooks ? (
+        <div className="text-center py-16">
+          <div className="w-24 h-24 mx-auto mb-6 bg-gradient-to-br from-blue-100 to-purple-100 rounded-full flex items-center justify-center">
+            <svg className="w-12 h-12 text-blue-500 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </div>
+          <h4 className="text-2xl font-bold text-gray-900 mb-3">
+            Loading your library...
+          </h4>
+          <p className="text-gray-600 mb-6 max-w-md mx-auto">
+            Fetching books from Google Drive with optimized loading.
+          </p>
+          
+          {/* Progress Bar */}
+          <div className="w-full max-w-md mx-auto mb-4">
+            <div className="bg-gray-200 rounded-full h-2">
+              <div 
+                className="bg-gradient-to-r from-blue-500 to-purple-600 h-2 rounded-full transition-all duration-300"
+                style={{ width: `${loadingProgress}%` }}
+              ></div>
+            </div>
+            <p className="text-sm text-gray-500 mt-2">
+              {loadingProgress}% complete
+            </p>
+          </div>
+        </div>
+          ) : isSearching ? (
+            <div className="text-center py-16">
+              <div className="w-24 h-24 mx-auto mb-6 bg-gradient-to-br from-green-100 to-emerald-100 rounded-full flex items-center justify-center">
+                <svg className="w-12 h-12 text-green-500 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+              </div>
+              <h4 className="text-2xl font-bold text-gray-900 mb-3">
+                Searching books...
+              </h4>
+              <p className="text-gray-600 mb-6 max-w-md mx-auto">
+                Looking for books matching "{searchQuery}"
+              </p>
+            </div>
+          ) : filteredBooks.length === 0 ? (
             <div className="text-center py-16">
               <div className="w-24 h-24 mx-auto mb-6 bg-gradient-to-br from-blue-100 to-purple-100 rounded-full flex items-center justify-center">
                 <svg className="w-12 h-12 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -830,18 +1013,30 @@ export default function LibraryPage() {
                     className="cursor-pointer p-4"
                   >
                     <div className="aspect-[3/4] bg-gradient-to-br from-gray-100 to-gray-200 rounded-xl mb-4 flex items-center justify-center overflow-hidden shadow-inner relative group">
-                      {book.cover ? (
-                        <img
-                          src={book.cover}
-                          alt={book.title}
-                          className="w-full h-full object-cover rounded-xl group-hover:scale-105 transition-transform duration-300"
-                          onError={(e) => {
-                            console.error('Failed to load cover image:', book.cover);
-                            e.currentTarget.style.display = 'none';
-                            e.currentTarget.nextElementSibling?.classList.remove('hidden');
-                          }}
-                        />
-                      ) : null}
+                    {book.cover ? (
+                      <img
+                        src={book.cover}
+                        alt={book.title}
+                        className="w-full h-full object-cover rounded-xl group-hover:scale-105 transition-transform duration-300"
+                        loading="lazy"
+                        decoding="async"
+                        onLoad={() => {
+                          // Preload next few covers for smoother scrolling
+                          const nextBooks = books.slice(books.indexOf(book) + 1, books.indexOf(book) + 4);
+                          nextBooks.forEach(nextBook => {
+                            if (nextBook.cover && !nextBook.cover.startsWith('blob:')) {
+                              const img = new Image();
+                              img.src = nextBook.cover;
+                            }
+                          });
+                        }}
+                        onError={(e) => {
+                          console.error('Failed to load cover image:', book.cover);
+                          e.currentTarget.style.display = 'none';
+                          e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                        }}
+                      />
+                    ) : null}
                       <div className={`text-center ${book.cover ? 'hidden' : ''}`}>
                         <div className="w-16 h-16 mx-auto mb-3 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center">
                           <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -908,6 +1103,42 @@ export default function LibraryPage() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* Load More Button */}
+          {!isLoadingBooks && hasMoreBooks && (
+            <div className="flex justify-center mt-8">
+              <button
+                onClick={loadMoreBooks}
+                disabled={isLoadingMore}
+                className="group flex items-center px-8 py-4 bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-2xl hover:from-blue-600 hover:to-purple-700 transition-all duration-300 hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <div className="flex items-center">
+                  {isLoadingMore ? (
+                    <svg className="w-5 h-5 mr-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  ) : (
+                    <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                    </svg>
+                  )}
+                  <span className="font-semibold">
+                    {isLoadingMore ? 'Loading more books...' : 'Load More Books'}
+                  </span>
+                </div>
+              </button>
+            </div>
+          )}
+
+          {/* Pagination Info */}
+          {!isLoadingBooks && books.length > 0 && (
+            <div className="text-center mt-6 text-gray-600">
+              <p className="text-sm">
+                Showing {books.length} books
+                {hasMoreBooks && ' (more available)'}
+              </p>
             </div>
           )}
         </div>
