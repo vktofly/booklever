@@ -5,7 +5,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useAuth } from '@/lib/auth/SimpleAuthContext';
+import { useAuth } from '@/lib/auth/GoogleAuthContext';
 
 export function Navigation() {
   const { user, signOut } = useAuth();
@@ -13,6 +13,7 @@ export function Navigation() {
 
   const navigation = [
     { name: 'Library', href: '/library' },
+    { name: 'Search', href: '/search' },
     { name: 'Reader', href: '/' },
     { name: 'Highlights', href: '/highlights' },
     { name: 'Review', href: '/review' },

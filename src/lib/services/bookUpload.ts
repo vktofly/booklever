@@ -3,7 +3,8 @@
 
 import { Book } from '@/types';
 import { IndexedDBService, StoredBook } from '@/lib/storage/indexedDB';
-// import { GoogleDriveService } from '@/lib/providers/googleDrive';
+import { GoogleDriveService } from '@/lib/services/googleDriveService';
+import { CoverManager } from './coverManager';
 
 export interface UploadProgress {
   stage: 'uploading' | 'processing' | 'storing' | 'complete';
@@ -19,11 +20,20 @@ export interface UploadResult {
 
 export class BookUploadService {
   private indexedDB: IndexedDBService;
+  private coverManager: CoverManager;
   private maxFileSize: number = 100 * 1024 * 1024; // 100MB
   private supportedTypes: string[] = ['application/epub+zip', 'application/pdf'];
 
   constructor() {
     this.indexedDB = new IndexedDBService();
+    this.coverManager = new CoverManager();
+  }
+
+  /**
+   * Set the current user for account-specific storage
+   */
+  setCurrentUser(userId: string | null): void {
+    this.indexedDB.setCurrentUser(userId);
   }
 
   /**
@@ -31,6 +41,7 @@ export class BookUploadService {
    */
   async initialize(): Promise<void> {
     await this.indexedDB.initialize();
+    await this.coverManager.initialize();
   }
 
   /**
@@ -39,7 +50,7 @@ export class BookUploadService {
   async uploadBook(
     file: File,
     onProgress?: (progress: UploadProgress) => void,
-    driveService?: any, // Temporarily disabled GoogleDriveService
+    driveService?: GoogleDriveService,
     booksFolderId?: string
   ): Promise<UploadResult> {
     try {
@@ -83,13 +94,23 @@ export class BookUploadService {
         id: this.generateBookId(),
         title: metadata.title,
         author: metadata.author,
-        cover: metadata.cover,
+        cover: undefined, // Will be set after cover extraction
         fileType: metadata.fileType,
         fileSize: file.size,
         uploadDate: new Date(),
         progress: 0,
         totalPages: metadata.totalPages
       };
+
+      onProgress?.({
+        stage: 'processing',
+        progress: 60,
+        message: 'Extracting book cover...'
+      });
+
+      // Extract and store cover
+      const coverResult = await this.coverManager.extractAndStoreCover(book, fileData);
+      book.cover = coverResult.thumbnailUrl;
 
       onProgress?.({
         stage: 'storing',
@@ -107,21 +128,86 @@ export class BookUploadService {
 
       await this.indexedDB.storeBook(storedBook);
 
-      // Upload to Google Drive if service is provided (temporarily disabled)
-      // if (driveService && booksFolderId) {
-      //   onProgress?.({
-      //     stage: 'storing',
-      //     progress: 90,
-      //     message: 'Uploading to Google Drive...'
-      //   });
+      // Upload to Google Drive if service is provided
+      if (driveService && booksFolderId) {
+        onProgress?.({
+          stage: 'storing',
+          progress: 85,
+          message: 'Creating book folder in Google Drive...'
+        });
 
-      //   try {
-      //     await driveService.uploadFile(file, booksFolderId);
-      //   } catch (error) {
-      //     console.warn('Failed to upload to Google Drive:', error);
-      //     // Continue with local storage only
-      //   }
-      // }
+        try {
+          // Create dedicated folder for this book
+          const bookFolder = await driveService.createBookFolder(book.title, booksFolderId);
+          
+          onProgress?.({
+            stage: 'storing',
+            progress: 90,
+            message: 'Uploading book to Google Drive...'
+          });
+
+          // Upload the book file
+          const fileData = await this.readFileData(file);
+          const mimeType = GoogleDriveService.getMimeType(file.name);
+          
+          await driveService.uploadFile(
+            `book.${file.name.split('.').pop()}`,
+            fileData,
+            mimeType,
+            bookFolder.bookFolderId
+          );
+
+          // Upload cover if available
+          if (book.cover && coverResult.coverUrl) {
+            onProgress?.({
+              stage: 'storing',
+              progress: 95,
+              message: 'Uploading book cover...'
+            });
+
+            try {
+              // Convert cover URL to blob and upload
+              const coverResponse = await fetch(coverResult.coverUrl);
+              const coverBlob = await coverResponse.blob();
+              const coverArrayBuffer = await coverBlob.arrayBuffer();
+              const coverData = new Uint8Array(coverArrayBuffer);
+              
+              await driveService.uploadFile(
+                'cover.jpg',
+                coverData,
+                'image/jpeg',
+                bookFolder.bookFolderId
+              );
+            } catch (coverError) {
+              console.warn('Failed to upload cover:', coverError);
+            }
+          }
+
+          // Upload metadata
+          const metadataJson = JSON.stringify({
+            title: book.title,
+            author: book.author,
+            fileType: book.fileType,
+            fileSize: book.fileSize,
+            uploadDate: book.uploadDate.toISOString(),
+            totalPages: book.totalPages,
+            cover: book.cover
+          }, null, 2);
+
+          const metadataData = new TextEncoder().encode(metadataJson);
+          await driveService.uploadFile(
+            'metadata.json',
+            metadataData,
+            'application/json',
+            bookFolder.bookFolderId
+          );
+
+          console.log(`Book "${book.title}" uploaded to Google Drive folder: ${bookFolder.bookFolderName}`);
+        } catch (error) {
+          console.warn('Failed to upload to Google Drive:', error);
+          // Continue with local storage only
+        }
+      }
 
       onProgress?.({
         stage: 'complete',
@@ -193,7 +279,6 @@ export class BookUploadService {
   private async extractMetadata(file: File, fileData: Uint8Array): Promise<{
     title: string;
     author: string;
-    cover?: string;
     fileType: 'epub' | 'pdf';
     totalPages?: number;
   }> {
@@ -202,78 +287,33 @@ export class BookUploadService {
     // Basic metadata extraction
     let title = file.name.replace(/\.[^/.]+$/, ''); // Remove extension
     let author = 'Unknown Author';
-    let cover: string | undefined;
     let totalPages: number | undefined;
 
-    if (fileType === 'epub') {
-      try {
-        // For EPUB, we could use epubjs to extract metadata
-        // For now, use filename as title
-        const metadata = await this.extractEPUBMetadata(fileData);
-        title = metadata.title || title;
-        author = metadata.author || author;
-        cover = metadata.cover;
-        totalPages = metadata.totalPages;
-      } catch (error) {
-        console.warn('Failed to extract EPUB metadata:', error);
-      }
-    } else if (fileType === 'pdf') {
-      try {
-        // For PDF, we could use PDF.js to extract metadata
-        // For now, use filename as title
-        const metadata = await this.extractPDFMetadata(fileData);
+    try {
+      // Use cover manager to extract metadata
+      if (fileType === 'epub') {
+        const metadata = await this.coverManager['coverExtractor'].extractEPUBMetadata(fileData);
         title = metadata.title || title;
         author = metadata.author || author;
         totalPages = metadata.totalPages;
-      } catch (error) {
-        console.warn('Failed to extract PDF metadata:', error);
+      } else {
+        const metadata = await this.coverManager['coverExtractor'].extractPDFMetadata(fileData);
+        title = metadata.title || title;
+        author = metadata.author || author;
+        totalPages = metadata.totalPages;
       }
+    } catch (error) {
+      console.warn('Failed to extract metadata:', error);
     }
 
     return {
       title,
       author,
-      cover,
       fileType,
       totalPages
     };
   }
 
-  /**
-   * Extract EPUB metadata
-   */
-  private async extractEPUBMetadata(fileData: Uint8Array): Promise<{
-    title?: string;
-    author?: string;
-    cover?: string;
-    totalPages?: number;
-  }> {
-    // This is a simplified implementation
-    // In a real app, you'd use epubjs to extract proper metadata
-    return {
-      title: undefined,
-      author: undefined,
-      cover: undefined,
-      totalPages: undefined
-    };
-  }
-
-  /**
-   * Extract PDF metadata
-   */
-  private async extractPDFMetadata(fileData: Uint8Array): Promise<{
-    title?: string;
-    author?: string;
-    totalPages?: number;
-  }> {
-    // This is a simplified implementation
-    // In a real app, you'd use PDF.js to extract proper metadata
-    return {
-      title: undefined,
-      author: undefined,
-      totalPages: undefined
-    };
-  }
 
   /**
    * Generate unique book ID
@@ -345,5 +385,156 @@ export class BookUploadService {
    */
   async cleanupOldBooks(maxBooks: number = 50): Promise<void> {
     await this.indexedDB.cleanupOldBooks(maxBooks);
+  }
+
+  /**
+   * Upload highlights to Google Drive for a specific book
+   */
+  async uploadHighlights(
+    bookId: string,
+    highlights: any[],
+    driveService: GoogleDriveService,
+    booksFolderId: string
+  ): Promise<void> {
+    try {
+      // Get book info to find the book folder
+      const book = await this.indexedDB.getBook(bookId);
+      if (!book) {
+        throw new Error('Book not found');
+      }
+
+      // Create book folder if it doesn't exist
+      const bookFolder = await driveService.createBookFolder(book.title, booksFolderId);
+      
+      // Upload highlights as JSON
+      const highlightsJson = JSON.stringify(highlights, null, 2);
+      const highlightsData = new TextEncoder().encode(highlightsJson);
+      
+      await driveService.uploadFile(
+        'highlights.json',
+        highlightsData,
+        'application/json',
+        bookFolder.bookFolderId
+      );
+
+      console.log(`Highlights uploaded for book "${book.title}"`);
+    } catch (error) {
+      console.error('Failed to upload highlights:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Clear all data for the current user (useful when switching accounts)
+   */
+  async clearUserData(): Promise<void> {
+    await this.indexedDB.clearUserData();
+  }
+
+  /**
+   * Get all books (local + remote metadata)
+   */
+  async getAllBooksWithDrive(driveService?: GoogleDriveService): Promise<Book[]> {
+    try {
+      // Get local books
+      const localBooks = await this.getAllBooks();
+      
+      if (!driveService) {
+        return localBooks;
+      }
+
+      // Get remote books from Google Drive
+      const driveFiles = await driveService.listBooks();
+      const remoteBooks = driveFiles.map(file => GoogleDriveService.driveFileToBook(file));
+
+      // Combine and deduplicate (prioritize local books)
+      const allBooks = [...localBooks];
+      
+      for (const remoteBook of remoteBooks) {
+        // Check if we already have this book locally
+        const existingBook = localBooks.find(book => 
+          book.driveFileId === remoteBook.driveFileId
+        );
+        
+        if (!existingBook) {
+          allBooks.push(remoteBook);
+        }
+      }
+
+      return allBooks;
+    } catch (error) {
+      console.error('Failed to get all books with Drive:', error);
+      // Fallback to local books only
+      return await this.getAllBooks();
+    }
+  }
+
+  /**
+   * Download book from Google Drive and store locally
+   */
+  async downloadBookFromDrive(
+    bookId: string, 
+    driveService: GoogleDriveService,
+    onProgress?: (progress: number) => void
+  ): Promise<StoredBook | null> {
+    try {
+      console.log('Downloading book from Drive:', bookId);
+      
+      // Extract Drive file ID from book ID
+      const driveFileId = bookId.replace('drive-', '');
+      
+      // Download file data
+      onProgress?.(10);
+      const fileData = await driveService.downloadFile(driveFileId);
+      onProgress?.(50);
+      
+      // Get book metadata
+      const driveFiles = await driveService.listBooks();
+      const driveFile = driveFiles.find(file => file.id === driveFileId);
+      
+      if (!driveFile) {
+        throw new Error('Book not found in Google Drive');
+      }
+      
+      // Convert to Book object
+      const book = GoogleDriveService.driveFileToBook(driveFile);
+      book.isDownloaded = true;
+      
+      // Extract metadata from file data
+      const metadata = await this.extractMetadata(
+        new File([fileData], driveFile.name, { type: driveFile.mimeType }),
+        fileData
+      );
+      
+      book.title = metadata.title;
+      book.author = metadata.author;
+      book.totalPages = metadata.totalPages;
+      
+      onProgress?.(80);
+      
+      // Extract and store cover
+      const coverResult = await this.coverManager.extractAndStoreCover(book, fileData);
+      book.cover = coverResult.thumbnailUrl;
+      
+      onProgress?.(90);
+      
+      // Store locally
+      const storedBook: StoredBook = {
+        ...book,
+        fileData,
+        cachedAt: new Date(),
+        lastAccessed: new Date()
+      };
+      
+      await this.indexedDB.storeBook(storedBook);
+      
+      onProgress?.(100);
+      console.log('Book downloaded and stored successfully:', book.title);
+      
+      return storedBook;
+    } catch (error) {
+      console.error('Failed to download book from Drive:', error);
+      throw error;
+    }
   }
 }

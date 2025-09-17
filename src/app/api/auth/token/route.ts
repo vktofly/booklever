@@ -31,9 +31,10 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json({
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
-      expiryDate: tokens.expiry_date || Date.now() + 3600000
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_in: 3600,
+      token_type: 'Bearer'
     });
 
   } catch (error) {

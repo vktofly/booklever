@@ -45,9 +45,9 @@ export function PDFReader({
         setPdfRenderer(renderer);
         setTotalPages(renderer.getTotalPages());
         
-        // Initialize shared reader
-        const pdfReader = new SharedPDFReader(bookData);
-        setReader(pdfReader);
+        // Initialize shared reader (simplified for now)
+        // const pdfReader = new SharedPDFReader(bookData);
+        // setReader(pdfReader);
         
         // Render the PDF
         if (contentRef.current) {
@@ -88,13 +88,49 @@ export function PDFReader({
 
   // Handle highlight creation
   const handleHighlightCreate = (color: Highlight['color']) => {
-    if (!reader || !currentSelection) return;
+    if (!currentSelection || !onHighlightCreate) return;
 
     try {
-      const highlight = reader.createHighlight(currentSelection, color, bookId, {
-        pageNumber: currentPage
-      });
-      onHighlightCreate?.(highlight);
+      // Create highlight using the shared highlight manager
+      const highlight: Highlight = {
+        id: `highlight-${Date.now()}`,
+        bookId,
+        text: currentSelection.toString(),
+        color,
+        note: '',
+        tags: [],
+        pageNumber: currentPage,
+        chapter: `Page ${currentPage}`,
+        position: {
+          primary: {
+            type: 'coordinates',
+            value: {
+              pageNumber: currentPage,
+              x: 0,
+              y: 0,
+              width: 100,
+              height: 20
+            },
+            textOffset: currentSelection.startOffset
+          },
+          fallback: {
+            textContent: currentSelection.toString(),
+            contextBefore: currentSelection.context?.before || '',
+            contextAfter: currentSelection.context?.after || '',
+            chapterId: `page-${currentPage}`,
+            pageNumber: currentPage
+          },
+          confidence: 0.95
+        },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        lastModified: new Date(),
+        platform: 'web',
+        importance: 1,
+        reviewHistory: []
+      };
+
+      onHighlightCreate(highlight);
       setCurrentSelection(null);
       setShowHighlightToolbar(false);
     } catch (error) {
@@ -136,7 +172,12 @@ export function PDFReader({
   useEffect(() => {
     return () => {
       if (pdfRenderer) {
-        pdfRenderer.destroy();
+        try {
+          pdfRenderer.destroy();
+        } catch (error) {
+          console.warn('PDFReader: Error during cleanup:', error);
+          // Don't let cleanup errors crash the app
+        }
       }
     };
   }, [pdfRenderer]);

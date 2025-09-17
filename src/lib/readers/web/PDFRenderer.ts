@@ -5,13 +5,15 @@
 let pdfjsLib: any = null;
 
 // Dynamically import PDF.js only on client side
-if (typeof window !== 'undefined') {
-  import('pdfjs-dist').then((pdfjs) => {
+const loadPDFJS = async () => {
+  if (typeof window !== 'undefined' && !pdfjsLib) {
+    const pdfjs = await import('pdfjs-dist');
     pdfjsLib = pdfjs;
     // Set up PDF.js worker
     pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
-  });
-}
+  }
+  return pdfjsLib;
+};
 
 export interface PDFRenderResult {
   content: string;
@@ -37,7 +39,7 @@ export interface PDFSelection {
 }
 
 export class PDFRenderer {
-  private pdfDocument: pdfjsLib.PDFDocumentProxy | null = null;
+  private pdfDocument: any = null;
   private currentPage: number = 1;
   private totalPages: number = 0;
   private container: HTMLElement | null = null;
@@ -51,26 +53,17 @@ export class PDFRenderer {
    */
   async loadPDF(data: Uint8Array): Promise<void> {
     try {
-      // Wait for PDF.js to be loaded
-      if (!pdfjsLib) {
-        await new Promise((resolve) => {
-          const checkPdfjs = () => {
-            if (pdfjsLib) {
-              resolve(true);
-            } else {
-              setTimeout(checkPdfjs, 100);
-            }
-          };
-          checkPdfjs();
-        });
+      // Ensure PDF.js is loaded
+      const pdfjs = await loadPDFJS();
+      if (!pdfjs) {
+        throw new Error('PDF.js failed to load');
       }
 
-      // Create a blob from the data
-      const blob = new Blob([data], { type: 'application/pdf' });
-      const arrayBuffer = await blob.arrayBuffer();
+      // Use the data directly as ArrayBuffer
+      const arrayBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
 
       // Load PDF document
-      this.pdfDocument = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      this.pdfDocument = await pdfjs.getDocument({ data: arrayBuffer }).promise;
       this.totalPages = this.pdfDocument.numPages;
     } catch (error) {
       console.error('Failed to load PDF:', error);
@@ -366,8 +359,12 @@ export class PDFRenderer {
    * Destroy the renderer
    */
   destroy(): void {
-    if (this.canvas && this.container) {
-      this.container.removeChild(this.canvas);
+    if (this.canvas && this.container && this.container.contains(this.canvas)) {
+      try {
+        this.container.removeChild(this.canvas);
+      } catch (error) {
+        console.warn('PDFRenderer: Could not remove canvas:', error);
+      }
     }
     this.canvas = null;
     this.context = null;

@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth } from '@/lib/auth/SimpleAuthContext';
+import { useAuth } from '@/lib/auth/GoogleAuthContext';
 
 export default function Home() {
   const { isAuthenticated, isLoading: authLoading } = useAuth();

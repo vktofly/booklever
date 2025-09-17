@@ -3,6 +3,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { google } from 'googleapis';
+import { Readable } from 'stream';
 
 export async function POST(request: NextRequest) {
   try {
@@ -23,6 +24,16 @@ export async function POST(request: NextRequest) {
         return await getDriveInfo(oauth2Client);
       case 'createFolders':
         return await createRequiredFolders(oauth2Client);
+      case 'uploadFile':
+        return await uploadFile(oauth2Client, data);
+      case 'listFiles':
+        return await listFiles(oauth2Client, data);
+      case 'downloadFile':
+        return await downloadFile(oauth2Client, data);
+      case 'deleteFile':
+        return await deleteFile(oauth2Client, data);
+      case 'createBookFolder':
+        return await createBookFolder(oauth2Client, data);
       default:
         return NextResponse.json(
           { error: 'Invalid action' },
@@ -70,6 +81,114 @@ async function createRequiredFolders(oauth2Client: any) {
   return NextResponse.json({
     booksFolderId: booksFolder.id,
     highlightsFolderId: highlightsFolder.id
+  });
+}
+
+async function createBookFolder(oauth2Client: any, data: any) {
+  const drive = google.drive({ version: 'v3', auth: oauth2Client });
+  
+  const { bookTitle, booksFolderId } = data;
+  
+  if (!bookTitle || !booksFolderId) {
+    throw new Error('Book title and books folder ID are required');
+  }
+
+  // Sanitize folder name (remove invalid characters)
+  const sanitizedTitle = bookTitle.replace(/[<>:"/\\|?*]/g, '_').trim();
+  
+  // Create individual book folder
+  const bookFolder = await createFolderIfNotExists(drive, sanitizedTitle, booksFolderId);
+
+  return NextResponse.json({
+    bookFolderId: bookFolder.id,
+    bookFolderName: sanitizedTitle
+  });
+}
+
+async function uploadFile(oauth2Client: any, data: any) {
+  const drive = google.drive({ version: 'v3', auth: oauth2Client });
+  
+  const { fileName, fileData, mimeType, parentFolderId } = data;
+  
+  // Convert base64 to buffer and create a readable stream
+  const buffer = Buffer.from(fileData, 'base64');
+  const stream = new Readable({
+    read() {
+      this.push(buffer);
+      this.push(null); // End the stream
+    }
+  });
+
+  const { data: uploadedFile } = await drive.files.create({
+    requestBody: {
+      name: fileName,
+      parents: [parentFolderId]
+    },
+    media: {
+      mimeType: mimeType,
+      body: stream
+    },
+    fields: 'id, name, size, createdTime, modifiedTime'
+  });
+
+  return NextResponse.json({
+    id: uploadedFile.id,
+    name: uploadedFile.name,
+    size: uploadedFile.size,
+    createdTime: uploadedFile.createdTime,
+    modifiedTime: uploadedFile.modifiedTime
+  });
+}
+
+async function listFiles(oauth2Client: any, data: any) {
+  const drive = google.drive({ version: 'v3', auth: oauth2Client });
+  
+  const { folderId, mimeType } = data;
+  
+  let query = `parents in '${folderId}' and trashed=false`;
+  if (mimeType) {
+    query += ` and mimeType='${mimeType}'`;
+  }
+
+  const { data: files } = await drive.files.list({
+    q: query,
+    fields: 'files(id, name, size, mimeType, createdTime, modifiedTime)',
+    orderBy: 'modifiedTime desc'
+  });
+
+  return NextResponse.json({
+    files: files.files || []
+  });
+}
+
+async function downloadFile(oauth2Client: any, data: any) {
+  const drive = google.drive({ version: 'v3', auth: oauth2Client });
+  
+  const { fileId } = data;
+  
+  const { data: fileData } = await drive.files.get({
+    fileId: fileId,
+    alt: 'media'
+  }, {
+    responseType: 'arraybuffer'
+  });
+
+  return NextResponse.json({
+    data: Buffer.from(fileData as ArrayBuffer).toString('base64')
+  });
+}
+
+async function deleteFile(oauth2Client: any, data: any) {
+  const drive = google.drive({ version: 'v3', auth: oauth2Client });
+  
+  const { fileId } = data;
+  
+  await drive.files.delete({
+    fileId: fileId
+  });
+
+  return NextResponse.json({
+    success: true
   });
 }
 

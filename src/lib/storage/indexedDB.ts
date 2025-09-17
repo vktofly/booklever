@@ -9,6 +9,16 @@ export interface StoredBook extends Book {
   lastAccessed: Date;
 }
 
+export interface BookCover {
+  id: string;
+  bookId: string;
+  coverUrl: string;
+  thumbnailUrl: string;
+  source: 'upload' | 'google_images' | 'extracted' | 'default';
+  uploadedAt: Date;
+  isDefault: boolean;
+}
+
 export interface StorageStats {
   totalBooks: number;
   totalHighlights: number;
@@ -18,31 +28,57 @@ export interface StorageStats {
 
 export class IndexedDBService {
   private dbName: string = 'BookLeverDB';
-  private version: number = 1;
+  private version: number = 4; // Incremented to add collections and tags support
   private db: IDBDatabase | null = null;
   private maxStorageSize: number = 2 * 1024 * 1024 * 1024; // 2GB
+  private currentUserId: string | null = null;
+
+  /**
+   * Set the current user ID for account-specific storage
+   */
+  setCurrentUser(userId: string | null): void {
+    this.currentUserId = userId;
+    console.log('IndexedDBService: Current user set to:', userId);
+  }
+
+  /**
+   * Get user-specific database name
+   */
+  private getUserSpecificDbName(): string {
+    if (this.currentUserId) {
+      return `BookLeverDB_${this.currentUserId}`;
+    }
+    return 'BookLeverDB_anonymous';
+  }
 
   /**
    * Initialize IndexedDB
    */
   async initialize(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(this.dbName, this.version);
+      const dbName = this.getUserSpecificDbName();
+      const request = indexedDB.open(dbName, this.version);
 
       request.onerror = () => {
-        reject(new Error('Failed to open IndexedDB'));
+        console.error('IndexedDB open error:', request.error);
+        reject(new Error(`Failed to open IndexedDB: ${request.error?.message || 'Unknown error'}`));
       };
 
       request.onsuccess = () => {
         this.db = request.result;
+        console.log('IndexedDB initialized successfully');
         resolve();
       };
 
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
+        const oldVersion = event.oldVersion;
+        
+        console.log(`IndexedDB upgrade from version ${oldVersion} to ${this.version}`);
         
         // Create books store
         if (!db.objectStoreNames.contains('books')) {
+          console.log('Creating books object store');
           const booksStore = db.createObjectStore('books', { keyPath: 'id' });
           booksStore.createIndex('title', 'title', { unique: false });
           booksStore.createIndex('author', 'author', { unique: false });
@@ -52,6 +88,7 @@ export class IndexedDBService {
 
         // Create highlights store
         if (!db.objectStoreNames.contains('highlights')) {
+          console.log('Creating highlights object store');
           const highlightsStore = db.createObjectStore('highlights', { keyPath: 'id' });
           highlightsStore.createIndex('bookId', 'bookId', { unique: false });
           highlightsStore.createIndex('createdAt', 'createdAt', { unique: false });
@@ -59,17 +96,50 @@ export class IndexedDBService {
           highlightsStore.createIndex('tags', 'tags', { unique: false, multiEntry: true });
         }
 
+        // Create book covers store (new in version 2)
+        if (!db.objectStoreNames.contains('bookCovers')) {
+          console.log('Creating bookCovers object store');
+          const coversStore = db.createObjectStore('bookCovers', { keyPath: 'id' });
+          coversStore.createIndex('bookId', 'bookId', { unique: false });
+          coversStore.createIndex('uploadedAt', 'uploadedAt', { unique: false });
+          coversStore.createIndex('source', 'source', { unique: false });
+        }
+
         // Create user preferences store
         if (!db.objectStoreNames.contains('preferences')) {
+          console.log('Creating preferences object store');
           db.createObjectStore('preferences', { keyPath: 'id' });
+        }
+
+        // Create collections store (new in version 4)
+        if (!db.objectStoreNames.contains('collections')) {
+          console.log('Creating collections object store');
+          const collectionsStore = db.createObjectStore('collections', { keyPath: 'id' });
+          collectionsStore.createIndex('name', 'name', { unique: false });
+          collectionsStore.createIndex('createdAt', 'createdAt', { unique: false });
+          collectionsStore.createIndex('isDefault', 'isDefault', { unique: false });
+        }
+
+        // Create tags store (new in version 4)
+        if (!db.objectStoreNames.contains('tags')) {
+          console.log('Creating tags object store');
+          const tagsStore = db.createObjectStore('tags', { keyPath: 'id' });
+          tagsStore.createIndex('name', 'name', { unique: true });
+          tagsStore.createIndex('createdAt', 'createdAt', { unique: false });
         }
 
         // Create sync queue store
         if (!db.objectStoreNames.contains('syncQueue')) {
+          console.log('Creating syncQueue object store');
           const syncStore = db.createObjectStore('syncQueue', { keyPath: 'id' });
           syncStore.createIndex('priority', 'priority', { unique: false });
           syncStore.createIndex('timestamp', 'timestamp', { unique: false });
         }
+      };
+
+      request.onblocked = () => {
+        console.warn('IndexedDB upgrade blocked - close other tabs');
+        reject(new Error('IndexedDB upgrade blocked. Please close other tabs and try again.'));
       };
     });
   }
@@ -436,6 +506,85 @@ export class IndexedDBService {
   }
 
   /**
+   * Store book cover
+   */
+  async storeBookCover(cover: BookCover): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.db) {
+        reject(new Error('Database not initialized'));
+        return;
+      }
+
+      const transaction = this.db.transaction(['bookCovers'], 'readwrite');
+      const store = transaction.objectStore('bookCovers');
+      const request = store.put(cover);
+
+      request.onsuccess = () => {
+        console.log('Book cover stored successfully:', cover.id);
+        resolve();
+      };
+
+      request.onerror = () => {
+        console.error('IndexedDB storeBookCover error:', request.error);
+        reject(new Error('Failed to store book cover'));
+      };
+    });
+  }
+
+  /**
+   * Get book cover by book ID
+   */
+  async getBookCover(bookId: string): Promise<BookCover | null> {
+    return new Promise((resolve, reject) => {
+      if (!this.db) {
+        reject(new Error('Database not initialized'));
+        return;
+      }
+
+      const transaction = this.db.transaction(['bookCovers'], 'readonly');
+      const store = transaction.objectStore('bookCovers');
+      const index = store.index('bookId');
+      const request = index.get(bookId);
+
+      request.onsuccess = () => {
+        const result = request.result;
+        resolve(result || null);
+      };
+
+      request.onerror = () => {
+        console.error('IndexedDB getBookCover error:', request.error);
+        reject(new Error('Failed to get book cover'));
+      };
+    });
+  }
+
+  /**
+   * Delete book cover
+   */
+  async deleteBookCover(coverId: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.db) {
+        reject(new Error('Database not initialized'));
+        return;
+      }
+
+      const transaction = this.db.transaction(['bookCovers'], 'readwrite');
+      const store = transaction.objectStore('bookCovers');
+      const request = store.delete(coverId);
+
+      request.onsuccess = () => {
+        console.log('Book cover deleted successfully:', coverId);
+        resolve();
+      };
+
+      request.onerror = () => {
+        console.error('IndexedDB deleteBookCover error:', request.error);
+        reject(new Error('Failed to delete book cover'));
+      };
+    });
+  }
+
+  /**
    * Get estimated storage quota
    */
   static async getStorageQuota(): Promise<{
@@ -457,5 +606,138 @@ export class IndexedDBService {
       usage: 0,
       available: 0
     };
+  }
+
+  /**
+   * Clear all data and reset database
+   */
+  async clearDatabase(): Promise<void> {
+    if (!this.db) {
+      throw new Error('IndexedDB not initialized');
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        const transaction = this.db!.transaction(['books', 'highlights', 'bookCovers', 'preferences', 'syncQueue'], 'readwrite');
+        
+        // Clear all object stores
+        const stores = ['books', 'highlights', 'bookCovers', 'preferences', 'syncQueue'];
+        let completed = 0;
+        let hasError = false;
+
+        stores.forEach(storeName => {
+          if (this.db!.objectStoreNames.contains(storeName)) {
+            const store = transaction.objectStore(storeName);
+            const clearRequest = store.clear();
+            
+            clearRequest.onsuccess = () => {
+              completed++;
+              if (completed === stores.length && !hasError) {
+                console.log('Database cleared successfully');
+                resolve();
+              }
+            };
+            
+            clearRequest.onerror = () => {
+              hasError = true;
+              console.error(`Failed to clear ${storeName}:`, clearRequest.error);
+              reject(new Error(`Failed to clear ${storeName}`));
+            };
+          } else {
+            completed++;
+            if (completed === stores.length && !hasError) {
+              resolve();
+            }
+          }
+        });
+
+        transaction.onerror = () => {
+          hasError = true;
+          reject(new Error('Transaction failed during database clear'));
+        };
+      } catch (error) {
+        reject(new Error(`Failed to clear database: ${error instanceof Error ? error.message : 'Unknown error'}`));
+      }
+    });
+  }
+
+  /**
+   * Force database upgrade by closing and reopening with higher version
+   */
+  async forceUpgrade(): Promise<void> {
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
+    
+    // Increment version to force upgrade
+    this.version++;
+    console.log(`Forcing database upgrade to version ${this.version}`);
+    
+    await this.initialize();
+  }
+
+  /**
+   * Clear all data for the current user (useful when switching accounts)
+   */
+  async clearUserData(): Promise<void> {
+    if (!this.db) {
+      console.log('IndexedDBService: No database to clear');
+      return;
+    }
+
+    try {
+      console.log('IndexedDBService: Clearing all data for current user');
+      
+      // Close current database
+      this.db.close();
+      this.db = null;
+
+      // Delete the user-specific database
+      const dbName = this.getUserSpecificDbName();
+      const deleteRequest = indexedDB.deleteDatabase(dbName);
+      
+      return new Promise((resolve, reject) => {
+        deleteRequest.onsuccess = () => {
+          console.log('IndexedDBService: User data cleared successfully');
+          resolve();
+        };
+        
+        deleteRequest.onerror = () => {
+          console.error('IndexedDBService: Failed to clear user data:', deleteRequest.error);
+          reject(deleteRequest.error);
+        };
+      });
+    } catch (error) {
+      console.error('IndexedDBService: Error clearing user data:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all user databases (for cleanup purposes)
+   */
+  static async getAllUserDatabases(): Promise<string[]> {
+    return new Promise((resolve) => {
+      const databases: string[] = [];
+      
+      // This is a simplified approach - in a real implementation,
+      // you might want to maintain a registry of user databases
+      if ('databases' in indexedDB) {
+        // Modern browsers support this
+        (indexedDB as any).databases().then((dbs: any[]) => {
+          const bookLeverDbs = dbs
+            .filter(db => db.name.startsWith('BookLeverDB_'))
+            .map(db => db.name);
+          resolve(bookLeverDbs);
+        }).catch(() => {
+          // Fallback if databases() is not supported
+          resolve([]);
+        });
+      } else {
+        // Fallback for older browsers
+        resolve([]);
+      }
+    });
   }
 }

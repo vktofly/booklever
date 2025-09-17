@@ -16,13 +16,25 @@ export interface Book {
   driveFileId?: string;
   providerId?: string;
   providerPath?: string;
+  // Enhanced metadata
+  rating?: number; // 1-5 stars
+  priority?: 'low' | 'normal' | 'high';
+  status?: 'unread' | 'reading' | 'completed' | 'paused';
+  collections?: string[]; // Collection IDs
+  tags?: string[];
+  notes?: string;
+  isFavorite?: boolean;
+  isFromDrive?: boolean;
+  isDownloaded?: boolean;
   metadata?: {
     isbn?: string;
     publisher?: string;
     publicationDate?: Date;
     language?: string;
     description?: string;
-    tags?: string[];
+    genre?: string;
+    series?: string;
+    volume?: number;
   };
 }
 
@@ -278,9 +290,97 @@ export interface PaginatedResponse<T> {
   };
 }
 
+// Collections and Tags
+export interface Collection {
+  id: string;
+  name: string;
+  description?: string;
+  color: string; // Hex color for UI
+  icon?: string; // Icon name or emoji
+  bookCount: number;
+  createdAt: Date;
+  updatedAt: Date;
+  isDefault?: boolean; // System collections like "Recently Added"
+}
+
+export interface Tag {
+  id: string;
+  name: string;
+  color?: string;
+  bookCount: number;
+  createdAt: Date;
+}
+
+// Search and Filter Types
+export interface SearchFilters {
+  query?: string;
+  collections?: string[];
+  tags?: string[];
+  fileTypes?: Book['fileType'][];
+  status?: Book['status'][];
+  rating?: number; // Minimum rating
+  dateRange?: {
+    start: Date;
+    end: Date;
+  };
+  fileSizeRange?: {
+    min: number; // bytes
+    max: number; // bytes
+  };
+  isFavorite?: boolean;
+  isFromDrive?: boolean;
+  isDownloaded?: boolean;
+  priority?: Book['priority'][];
+  author?: string;
+  publisher?: string;
+  genre?: string;
+}
+
+export interface SearchOptions {
+  limit?: number;
+  offset?: number;
+  sortBy?: 'title' | 'author' | 'uploadDate' | 'lastRead' | 'progress' | 'rating' | 'fileSize';
+  sortOrder?: 'asc' | 'desc';
+  includeContent?: boolean; // Search within book content
+  fuzzySearch?: boolean;
+}
+
+export interface SearchResult {
+  type: 'book' | 'highlight';
+  bookId: string;
+  bookTitle: string;
+  bookAuthor: string;
+  relevance: number; // 0-1
+  highlight?: Highlight;
+  matchedText?: string;
+  context?: string;
+}
+
+// Book Management Types
+export interface BookEditData {
+  title?: string;
+  author?: string;
+  rating?: number;
+  priority?: Book['priority'];
+  status?: Book['status'];
+  collections?: string[];
+  tags?: string[];
+  notes?: string;
+  isFavorite?: boolean;
+  metadata?: Partial<Book['metadata']>;
+}
+
+export interface BulkBookOperation {
+  bookIds: string[];
+  operation: 'delete' | 'addToCollection' | 'removeFromCollection' | 'addTags' | 'removeTags' | 'setStatus' | 'setPriority' | 'setRating';
+  data?: any;
+}
+
 // Export types for external use
 export type HighlightColor = Highlight['color'];
 export type BookFormat = Book['fileType'];
 export type Platform = Highlight['platform'];
 export type Theme = UserPreferences['theme'];
 export type ExportFormat = UserPreferences['exportFormat'];
+export type BookStatus = Book['status'];
+export type BookPriority = Book['priority'];
