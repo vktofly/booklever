@@ -341,39 +341,45 @@ export class CoverManager {
       const coverData = new Uint8Array(arrayBuffer);
 
       // Upload cover to Drive
-      const driveFileId = await this.driveService.uploadFile(
+      const driveFile = await this.driveService.uploadFile(
         'cover.jpg',
         coverData,
         'image/jpeg',
-        book.metadata?.bookFolderId
+        (book as any).driveBookFolderId
       );
 
-      if (driveFileId) {
+      if (driveFile) {
         try {
           // Download the uploaded cover and convert to data URL
-          const coverData = await this.driveService.downloadFile(driveFileId);
-          const blob = new Blob([coverData], { type: 'image/jpeg' });
+          const coverData = await this.driveService.downloadFile(driveFile.id);
+          const blob = new Blob([new Uint8Array(coverData)], { type: 'image/jpeg' });
           const thumbnailUrl = URL.createObjectURL(blob);
           
           // Update book metadata with new cover
-          const updatedMetadata = {
-            ...book.metadata,
-            cover: thumbnailUrl
+          const updatedBook = {
+            ...book,
+            metadata: {
+              ...book.metadata,
+              cover: thumbnailUrl
+            }
           };
 
           // Update the book in IndexedDB
-          await this.indexedDB.updateBook(bookId, { metadata: updatedMetadata });
+          await this.indexedDB.storeBook(updatedBook);
 
           console.log('Cover uploaded to Drive and metadata updated:', thumbnailUrl);
         } catch (error) {
           console.error('Failed to download and convert cover:', error);
           // Fallback to thumbnail URL
-          const thumbnailUrl = `https://drive.google.com/thumbnail?id=${driveFileId}&sz=w400-h600`;
-          const updatedMetadata = {
-            ...book.metadata,
-            cover: thumbnailUrl
+          const thumbnailUrl = `https://drive.google.com/thumbnail?id=${driveFile.id}&sz=w400-h600`;
+          const updatedBook = {
+            ...book,
+            metadata: {
+              ...book.metadata,
+              cover: thumbnailUrl
+            }
           };
-          await this.indexedDB.updateBook(bookId, { metadata: updatedMetadata });
+          await this.indexedDB.storeBook(updatedBook);
         }
       }
     } catch (error) {

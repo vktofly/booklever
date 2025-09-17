@@ -180,7 +180,7 @@ export class GoogleDriveService {
       // Check if there are individual book folders
       if (subfoldersResponse.files.length > 0) {
         // Process book folders in parallel for much faster loading
-        const bookPromises = subfoldersResponse.files.map(async (bookFolder) => {
+        const bookPromises = subfoldersResponse.files.map(async (bookFolder: DriveApiFile) => {
           try {
             console.log(`GoogleDriveService: Processing book folder: ${bookFolder.name}`);
             
@@ -365,7 +365,7 @@ export class GoogleDriveService {
       // Check if there are individual book folders
       if (subfoldersResponse.files.length > 0) {
         // Process book folders in parallel for much faster loading
-        const bookPromises = subfoldersResponse.files.map(async (bookFolder) => {
+        const bookPromises = subfoldersResponse.files.map(async (bookFolder: DriveApiFile) => {
           try {
             console.log(`GoogleDriveService: Processing book folder: ${bookFolder.name}`);
             
